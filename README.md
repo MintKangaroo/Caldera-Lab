@@ -4,6 +4,16 @@
 제약형 adversary-emulation 프로젝트입니다. 원본 CALDERA의 능력/에이전트 개념을
 참고하되, 이 프로젝트는 안전한 랩 안에서만 실행되도록 명령·네트워크·권한을 제한합니다.
 
+## 현재 상태
+
+MVP 구현이 완료되어 `main` 브랜치에 반영되어 있습니다. Docker 이미지 빌드와 non-root
+격리 에이전트의 실제 2단계 실행을 확인했고, 테스트 6개와 Ruff 검사를 통과했습니다.
+대시보드에는 7번째 프로젝트인 Caldera Lab으로 등록되어 있습니다.
+
+다음 세션은 저장소의 [`HANDOFF.md`](HANDOFF.md)를 먼저 읽고 이어서 진행하세요. 현재
+범위는 안전한 discovery 능력에 한정된 연구용 기반이며, 능력을 추가할 때는 catalog,
+policy, Docker 경계, 감사 로그, 테스트를 함께 갱신해야 합니다.
+
 ## 핵심 차별점
 
 - LLM planner: 관찰 로그를 보고 다음 단계를 제안하지만, 결과는 로컬 allowlist로 재검증합니다.
@@ -63,6 +73,15 @@ make check
 
 현재 테스트는 catalog 검증, planner fallback, RL 실행 루프, JSONL 감사 로그,
 local executor를 검증합니다. GitHub Actions는 Python 3.10/3.12에서 lint와 테스트를 실행합니다.
+
+최근 검증 결과:
+
+```text
+ruff check .       -> All checks passed
+pytest             -> 6 passed
+Docker execution   -> 2 abilities succeeded as uid=65534(nobody)
+GitHub Actions      -> success (Python 3.10 / 3.12)
+```
 
 ## 구조
 
