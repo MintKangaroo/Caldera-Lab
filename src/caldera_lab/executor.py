@@ -74,6 +74,8 @@ class DockerLabExecutor:
             "--network",
             "none" if not policy.allow_network else "bridge",
             "--read-only",
+            "--user",
+            "65534:65534",
             "--cap-drop",
             "ALL",
             "--security-opt",
