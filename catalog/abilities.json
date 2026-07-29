@@ -1,0 +1,38 @@
+[
+  {
+    "id": "collect-host-identity",
+    "name": "Collect host identity",
+    "tactic": "discovery",
+    "technique": "T1033",
+    "command": ["id"],
+    "description": "Collect the isolated agent identity for lab telemetry.",
+    "risk": "low"
+  },
+  {
+    "id": "collect-system-info",
+    "name": "Collect system information",
+    "tactic": "discovery",
+    "technique": "T1082",
+    "command": ["uname", "-a"],
+    "description": "Collect kernel information from the isolated target.",
+    "risk": "low"
+  },
+  {
+    "id": "collect-process-list",
+    "name": "Collect process list",
+    "tactic": "discovery",
+    "technique": "T1057",
+    "command": ["ps", "-ef"],
+    "description": "Collect processes visible inside the isolated target.",
+    "risk": "low"
+  },
+  {
+    "id": "collect-workspace-files",
+    "name": "Collect workspace listing",
+    "tactic": "discovery",
+    "technique": "T1083",
+    "command": ["find", "/workspace", "-maxdepth", "2", "-type", "f"],
+    "description": "List only the explicitly mounted lab workspace.",
+    "risk": "low"
+  }
+]
