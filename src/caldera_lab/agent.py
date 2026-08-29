@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import json
+import time
+import urllib.error
 import urllib.request
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .catalog import AbilityCatalog
 from .executor import Executor
 from .policy import LabPolicy
+
+
+class BeaconUnauthorised(RuntimeError):
+    """The server rejected the token. Retrying cannot help."""
 
 
 @dataclass
@@ -27,11 +33,15 @@ class BeaconAgent:
     policy: LabPolicy
     agent_id: str = ""
     timeout: float = 10.0
+    attempts: int = 3
+    backoff_seconds: float = 0.2
+    transport_errors: int = field(default=0, init=False)
+    reregistrations: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         self.agent_id = self.agent_id or f"agent-{uuid.uuid4().hex[:8]}"
 
-    def _post(self, path: str, payload: dict[str, object]) -> dict[str, object]:
+    def _request(self, path: str, payload: dict[str, object]) -> dict[str, object]:
         request = urllib.request.Request(
             f"{self.url}{path}",
             data=json.dumps({"agent_id": self.agent_id, **payload}).encode(),
@@ -41,6 +51,35 @@ class BeaconAgent:
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             body = json.loads(response.read().decode())
         return body if isinstance(body, dict) else {}
+
+    def _post(
+        self, path: str, payload: dict[str, object], _retrying: bool = False
+    ) -> dict[str, object]:
+        """Post with bounded retries, distinguishing what retrying can fix.
+
+        A dropped connection is worth another attempt; a rejected token is not,
+        and an agent the server has forgotten needs to register again rather
+        than beacon into a 403 loop.
+        """
+        last: Exception | None = None
+        for attempt in range(1, self.attempts + 1):
+            try:
+                return self._request(path, payload)
+            except urllib.error.HTTPError as exc:
+                if exc.code == 401:
+                    raise BeaconUnauthorised("beacon server rejected the run token") from exc
+                if exc.code == 403 and path != "/register" and not _retrying:
+                    # The server restarted or forgot us; re-register once.
+                    self.reregistrations += 1
+                    self._post("/register", {}, _retrying=True)
+                    return self._post(path, payload, _retrying=True)
+                raise
+            except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                last = exc
+                self.transport_errors += 1
+                if attempt < self.attempts:
+                    time.sleep(self.backoff_seconds * attempt)
+        raise ConnectionError(f"beacon unreachable after {self.attempts} attempts: {last}")
 
     def register(self) -> dict[str, object]:
         return self._post("/register", {})

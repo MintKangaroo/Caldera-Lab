@@ -13,7 +13,7 @@ import pytest
 
 from caldera_lab import cli
 from caldera_lab import planner as planner_module
-from caldera_lab.agent import BeaconAgent
+from caldera_lab.agent import BeaconAgent, BeaconUnauthorised
 from caldera_lab.beacon import BeaconRefused, BeaconServer, BeaconState
 from caldera_lab.catalog import Ability, AbilityCatalog
 from caldera_lab.coordinator import Coordinator
@@ -1210,3 +1210,114 @@ def test_docker_executor_cleans_up_after_a_spawn_failure() -> None:
 
     assert result.status == "failed"
     assert recorded[1][:3] == ["docker", "rm", "--force"]
+
+
+def test_agent_retries_a_dropped_connection(catalog: AbilityCatalog, beacon) -> None:
+    server, _ = beacon
+    agent = BeaconAgent(
+        catalog, DryRunExecutor(), server.url, server.token, LabPolicy(), backoff_seconds=0.01
+    )
+    real = agent._request
+    calls = {"n": 0}
+
+    def flaky(path: str, payload: dict[str, object]) -> dict[str, object]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.URLError("connection reset")
+        return real(path, payload)
+
+    with mock.patch.object(agent, "_request", flaky):
+        agent.register()
+    assert agent.transport_errors == 1
+
+
+def test_agent_gives_up_after_its_retry_budget(catalog: AbilityCatalog) -> None:
+    agent = BeaconAgent(
+        catalog,
+        DryRunExecutor(),
+        "http://127.0.0.1:1",
+        "token",
+        LabPolicy(),
+        attempts=2,
+        backoff_seconds=0.01,
+    )
+    with pytest.raises(ConnectionError, match="after 2 attempts"):
+        agent.register()
+    assert agent.transport_errors == 2
+
+
+def test_agent_does_not_retry_a_rejected_token(catalog: AbilityCatalog, beacon) -> None:
+    server, _ = beacon
+    agent = BeaconAgent(
+        catalog, DryRunExecutor(), server.url, "wrong-token", LabPolicy(), backoff_seconds=0.01
+    )
+    with pytest.raises(BeaconUnauthorised):
+        agent.register()
+    # Retrying a bad token only wastes time; it is not a transport problem.
+    assert agent.transport_errors == 0
+
+
+def test_agent_reregisters_when_the_server_forgot_it(catalog: AbilityCatalog, beacon) -> None:
+    server, state = beacon
+    agent = BeaconAgent(catalog, DryRunExecutor(), server.url, server.token, LabPolicy())
+    agent.register()
+    # Simulate a server restart that lost its agent table.
+    state.agents.clear()
+    assert isinstance(agent._post("/beacon", {}).get("ability_id"), str)
+    assert agent.reregistrations == 1
+    assert agent.agent_id in state.agents
+
+
+def test_serve_cli_restricts_a_named_agent(tmp_path: Path, capsys) -> None:
+    log = tmp_path / "events.jsonl"
+    cli.main(
+        [
+            "serve", "--executor", "dry-run", "--planner", "rules",
+            "--steps", "6", "--agents", "3",
+            "--agent-policy", "agent-2=collect-host-identity",
+            "--no-q-table", "--log", str(log),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "agent-2 (restricted)" in out
+    records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    approved = [r for r in records if r["event"] == "ability.approved"]
+    restricted = [r for r in approved if r["details"]["agent_id"] == "agent-2"]
+    # The invariant is what it may run, not that it is guaranteed work: another
+    # agent can take its one permitted ability first, and starvation is the
+    # correct outcome of a shared budget rather than a failure.
+    assert all(r["details"]["ability_id"] == "collect-host-identity" for r in restricted)
+    assert all(r["details"]["policy"] == "agent" for r in restricted)
+    assert len(approved) > len(restricted)
+    if not restricted:
+        withheld = [r for r in records if r["event"] == "ability.withheld"]
+        assert any(r["details"]["agent_id"] == "agent-2" for r in withheld)
+
+
+def test_a_restricted_agent_is_starved_rather_than_served_the_wrong_ability(
+    catalog: AbilityCatalog,
+) -> None:
+    """Documented consequence of a shared budget, pinned so it stays deliberate."""
+    coordinator = Coordinator(
+        catalog,
+        planner_mode="rules",
+        max_steps=4,
+        agent_policies={"narrow": LabPolicy(approved_abilities=frozenset({catalog.ids()[0]}))},
+    )
+    # An open agent takes the only ability the narrow agent could have run.
+    assert coordinator.next_ability("open") == catalog.ids()[0]
+    assert coordinator.next_ability("narrow") is None
+    withheld = [event for event in coordinator.events if event.event == "ability.withheld"]
+    assert withheld[-1].details["agent_id"] == "narrow"
+
+
+def test_serve_cli_rejects_an_unknown_ability_in_a_policy() -> None:
+    with pytest.raises(SystemExit):
+        cli.main(
+            ["serve", "--executor", "dry-run", "--agent-policy", "agent-1=not-an-ability"]
+        )
+
+
+def test_serve_cli_rejects_a_malformed_policy_spec() -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["serve", "--executor", "dry-run", "--agent-policy", "missing-equals"])

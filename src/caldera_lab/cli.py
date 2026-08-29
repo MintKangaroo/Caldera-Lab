@@ -82,17 +82,38 @@ def _build_executor(
     raise AssertionError("unreachable")
 
 
+def _agent_policies(
+    parser: argparse.ArgumentParser, catalog: AbilityCatalog, specs: list[str]
+) -> dict[str, LabPolicy]:
+    policies: dict[str, LabPolicy] = {}
+    for spec in specs:
+        agent_id, separator, ids = spec.partition("=")
+        if not separator or not agent_id:
+            parser.error(f"--agent-policy expects AGENT=ID[,ID...], got: {spec}")
+        approved = tuple(item.strip() for item in ids.split(",") if item.strip())
+        for ability_id in approved:
+            # Fail here rather than silently granting an agent nothing at all.
+            try:
+                catalog.get(ability_id)
+            except KeyError:
+                parser.error(f"--agent-policy names an ability outside the catalog: {ability_id}")
+        policies[agent_id] = LabPolicy(approved_abilities=frozenset(approved))
+    return policies
+
+
 def _serve(
     parser: argparse.ArgumentParser, catalog: AbilityCatalog, args: argparse.Namespace
 ) -> None:
     executor = _build_executor(parser, args)
     policy = LabPolicy()
+    agent_policies = _agent_policies(parser, catalog, args.agent_policy)
     coordinator = Coordinator(
         catalog,
         policy=policy,
         planner_mode=args.planner,
         q_table_path=None if args.no_q_table else args.q_table,
         max_steps=args.steps,
+        agent_policies=agent_policies,
     )
     sink = _EventSink(coordinator.run_id, args.log)
 
@@ -121,9 +142,17 @@ def _serve(
 
     with BeaconServer(state) as server:
         print(f"beacon listening on {server.url} (token is per-run and not persisted)")
+        # Deterministic ids so --agent-policy can name an agent up front.
         agents = [
-            BeaconAgent(catalog, executor, server.url, server.token, policy)
-            for _ in range(args.agents)
+            BeaconAgent(
+                catalog,
+                executor,
+                server.url,
+                server.token,
+                agent_policies.get(f"agent-{index}", policy),
+                agent_id=f"agent-{index}",
+            )
+            for index in range(1, args.agents + 1)
         ]
 
         def drive(agent: BeaconAgent) -> None:
@@ -142,11 +171,15 @@ def _serve(
     write_events(events, args.log)
     sink.flush()
     for agent in agents:
-        record = state.agents[agent.agent_id]
-        print(f"agent {agent.agent_id} ran {len(record.results)} abilities")
+        record = state.agents.get(agent.agent_id)
+        scope = "restricted" if agent.agent_id in agent_policies else "lab policy"
+        count = len(record.results) if record else 0
+        print(f"agent {agent.agent_id} ({scope}) ran {count} abilities")
+        if not record:
+            continue
         for result in record.results:
             first_line = result["stdout"].splitlines()[0] if result["stdout"] else ""
-            print(f"  {result['ability_id']:<26}{result['status']:<12}{first_line[:60]}")
+            print(f"  {result['ability_id']:<28} {result['status']:<11} {first_line[:60]}")
     print(
         f"run {coordinator.run_id}: {len(events)} coordinator + "
         f"{len(sink.events)} beacon events -> {args.log}"
@@ -194,6 +227,16 @@ def main(argv: list[str] | None = None) -> None:
     serve.add_argument("--log", type=Path, default=Path(".runtime/run.jsonl"))
     serve.add_argument("--q-table", type=Path, default=Path(".runtime/q_table.json"))
     serve.add_argument("--no-q-table", action="store_true")
+    serve.add_argument(
+        "--agent-policy",
+        action="append",
+        default=[],
+        metavar="AGENT=ID[,ID...]",
+        help=(
+            "restrict one agent to a subset of the catalog, e.g. "
+            "--agent-policy agent-2=collect-host-identity. Repeatable."
+        ),
+    )
     serve.add_argument("--allow-local", action="store_true")
 
     report = sub.add_parser("report", help="summarise an audit log")

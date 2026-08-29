@@ -121,6 +121,19 @@ allowlist가 거부한 ID 목록도 함께 보여줍니다.
 베이스 이미지는 digest로 고정되어 있습니다. 갱신 시 CI의 `docker-smoke` 잡을 다시 통과시켜야
 합니다. 안전 경계와 능력 추가 절차는 [`SECURITY.md`](SECURITY.md)를 따르세요.
 
+### 제한된 에이전트와 굶주림
+
+에이전트별 정책은 "무엇을 실행할 수 있는가"를 보장할 뿐, "작업을 받는다"를 보장하지 않습니다.
+예산과 `used` 집합이 공유되므로, 제한 없는 에이전트가 제한된 에이전트의 유일한 허용 능력을
+먼저 가져가면 그 에이전트는 아무것도 받지 못하고 `ability.withheld`로 기록됩니다. 공유 예산에서
+이는 실패가 아니라 올바른 결과이며, 테스트로 고정해 두었습니다.
+
+### 재접속과 재시도
+
+에이전트는 전송 실패를 최대 `attempts`회(기본 3) 백오프와 함께 재시도합니다. 재시도로 고칠 수
+없는 것은 구분합니다 — 토큰 거부(401)는 즉시 `BeaconUnauthorised`로 중단하고, 서버가 에이전트를
+잊은 경우(403)는 한 번 재등록한 뒤 원래 요청을 재시도합니다.
+
 ### 동시 실행과 RL 신용 할당
 
 에이전트를 여러 개 붙이면 결과가 돌아오기 전에 여러 능력이 한꺼번에 배정됩니다. RL은 **배정
@@ -154,7 +167,8 @@ catalog의 `volatile_patterns`로 **능력별로 선언**해 해결합니다.
 - 기본 정책은 low-risk 능력, 최대 8단계, 단계별 timeout, 네트워크 비활성입니다.
 - timeout은 클라이언트가 아니라 컨테이너에 강제됩니다. 초과 시 컨테이너를 이름으로
   강제 제거하며(`docker rm --force`), 결과는 `timed-out` 상태로 기록됩니다.
-- 에이전트마다 랩 기본값보다 좁은 정책을 적용할 수 있습니다(`Coordinator(agent_policies=...)`).
+- 에이전트마다 랩 기본값보다 좁은 정책을 적용할 수 있습니다
+  (`serve --agent-policy agent-2=collect-host-identity`, 반복 지정 가능).
   허용되지 않는 능력은 애초에 배정되지 않고 `ability.withheld` 이벤트로 남습니다.
 - `requires_network` 능력은 정책이 네트워크를 허용하지 않는 한 실행되지 않습니다.
 - `LabPolicy(approved_abilities=...)`로 catalog보다 좁은 승인 집합을 강제할 수 있습니다.
@@ -188,7 +202,7 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 92 passed
+pytest             -> 100 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문

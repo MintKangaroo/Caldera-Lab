@@ -26,8 +26,12 @@ that weakens one as a security change, not a refactor.
   operator-configurable. Rejected IDs are recorded, not discarded silently.
 - `LabPolicy` gates risk level, network use, step count, and an optional
   approved set narrower than the catalog. Individual agents may be held to a
-  narrower policy still; abilities their policy forbids are never offered to
-  them, and the refusal is audited as `ability.withheld`.
+  narrower policy still (`serve --agent-policy`); abilities their policy
+  forbids are never offered to them, and the refusal is audited as
+  `ability.withheld`. The guarantee is about what an agent may run, not that it
+  is given work: under a shared budget a restricted agent can be starved.
+- An agent retries transport failures but never retries a rejected token, and
+  re-registers at most once when the server no longer knows it.
 - A step timeout is enforced against the container, not just the client. On
   expiry the container is removed by name, because `--rm` only runs if the
   client survives to perform it. The result is recorded as `timed-out`, which
