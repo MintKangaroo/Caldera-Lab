@@ -65,6 +65,7 @@ class Orchestrator:
                     "source": plan.source,
                     "rationale": plan.rationale,
                     "abilities": plan.ability_ids,
+                    "diagnostics": plan.diagnostics,
                 },
             )
         )
@@ -126,6 +127,20 @@ class Orchestrator:
             remaining = limit - index - 1
             if remaining:
                 plan = self.planner.plan(observations, remaining)
+                if plan.diagnostics:
+                    events.append(
+                        Event(
+                            now(),
+                            self.run_id,
+                            "plan.replanned",
+                            {
+                                "index": index,
+                                "source": plan.source,
+                                "abilities": plan.ability_ids,
+                                "diagnostics": plan.diagnostics,
+                            },
+                        )
+                    )
         if self.q_table_path:
             self.rl.save(self.q_table_path)
             events.append(

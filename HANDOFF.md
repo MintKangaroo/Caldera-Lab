@@ -108,14 +108,18 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
   사실의 비율입니다(에피소드 단위로 초기화). 항별 분해는 `reward.scored` 이벤트로 남깁니다.
 - `ExecutionResult.duration_seconds`를 추가하고 시간 비용을 정책 timeout 대비로 상한했습니다.
 - 알려진 한계: 실행마다 변하는 출력(hostname, PID)은 novel로 집계됩니다. 테스트로 고정됨.
-- 테스트 6개 -> 31개.
+- LLM planner 계약을 강화했습니다. Responses API의 `json_schema` strict 출력으로 catalog ID만
+  허용하고, 재시도(기본 2회)·요청 timeout·지연·토큰 사용량을 기록합니다. 기존 `except: pass`로
+  삼켜지던 실패는 이제 `Plan.diagnostics`를 거쳐 `plan.created`/`plan.replanned` 이벤트에
+  사유와 함께 남습니다. 거부된 ID 문자열도 함께 기록합니다.
+- 테스트 6개 -> 40개.
 
 ## 6. 다음 세션 우선순위
 
 1. **에이전트 통신 계층**: 현재는 CLI가 Docker executor를 직접 호출합니다. 다음 단계로
    loopback 전용 heartbeat/result protocol을 추가하되, 외부 bind와 임의 command 전달은 금지합니다.
-2. **LLM planner 계약 강화**: Responses API의 구조화 출력(JSON schema)을 사용하고, timeout·재시도·
-   사용량 메타데이터를 감사 이벤트에 기록합니다.
+2. ~~**LLM planner 계약 강화**~~: 완료(5-1 참고). 실제 API 키로의 end-to-end 검증은 아직
+   수행하지 않았습니다. 스텁 기반 테스트만 있습니다.
 3. ~~**RL 학습 지속성**~~, ~~**보상 설계**~~: 완료(5-1 참고). 남은 것은 변동성 출력의
    정규화입니다.
 4. **능력 catalog 확장**: 새로운 low-risk discovery 능력부터 추가하고 각 항목에 negative test,

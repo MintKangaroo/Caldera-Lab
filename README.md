@@ -17,6 +17,8 @@ policy, Docker 경계, 감사 로그, 테스트를 함께 갱신해야 합니다
 ## 핵심 차별점
 
 - LLM planner: 관찰 로그를 보고 다음 단계를 제안하지만, 결과는 로컬 allowlist로 재검증합니다.
+  요청은 catalog ID만 허용하는 JSON schema로 제약하며, 실패는 조용히 넘어가지 않고
+  사유·재시도·지연·토큰 사용량을 `plan.created` / `plan.replanned` 이벤트에 남깁니다.
 - RL policy: tabular Q-policy가 허용된 능력 중 다음 능력을 선택하고 보상으로 업데이트합니다.
   state는 "완료한 능력 집합 + 마지막 결과"로 추상화되어 실행 간 재방문·재사용되며,
   Q table은 `--q-table`(기본 `.runtime/q_table.json`)에 저장됩니다.
@@ -53,9 +55,15 @@ PYTHONPATH=src python3 -m caldera_lab run --executor docker --planner hybrid --s
 학습 없이 실행하려면 `--no-q-table`을 씁니다. 저장된 table은 catalog 지문이 일치할 때만
 로드되며, 불일치·손상·catalog 밖 action이 있으면 조용히 무시하고 빈 table로 시작합니다.
 
-API 키가 없으면 `hybrid` planner는 결정론적 규칙 planner로 안전하게 fallback합니다.
-LLM 사용 시 `OPENAI_API_KEY`, 선택적으로 `CALDERA_LLM_MODEL`과
-`CALDERA_LLM_ENDPOINT`를 설정합니다. LLM은 명령을 만들 수 없고 catalog의 ID만 반환합니다.
+API 키가 없으면 `hybrid` planner는 결정론적 규칙 planner로 안전하게 fallback하며, 그
+사유(`no_api_key`)가 감사 로그에 남습니다. LLM 사용 시 `OPENAI_API_KEY`, 선택적으로
+`CALDERA_LLM_MODEL`과 `CALDERA_LLM_ENDPOINT`를 설정합니다. LLM은 명령을 만들 수 없고
+catalog의 ID만 반환합니다. 엔드포인트는 운영자가 바꿀 수 있으므로 schema 제약과 별개로
+로컬 allowlist가 최종 경계이며, 거부된 ID는 `rejected_ability_ids`로 기록됩니다.
+
+fallback 사유는 `no_api_key`, `transport_error`, `http_<code>`, `invalid_json_body`,
+`invalid_json_output`, `output_not_an_object`, `missing_ability_ids`, `no_allowlisted_ids`,
+`no_text_in_response`입니다.
 
 개발 중 Docker 없이 흐름만 확인하려면:
 
@@ -91,13 +99,14 @@ make check
 현재 테스트는 catalog 검증, planner fallback, LLM이 catalog 밖 ID를 반환할 때의 거부,
 CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 감사 로그 append와 `run_id`
 분리, RL state 추상화·Q table 왕복·손상된 table 거부·시드 재현성, 보상의 정보 이득·중복
-감점·시간 비용 상한, local executor를 검증합니다. GitHub Actions는 Python 3.10/3.12에서 lint와 테스트를 실행합니다.
+감점·시간 비용 상한, LLM planner의 schema 제약·재시도·fallback 사유 기록, local executor를
+검증합니다. GitHub Actions는 Python 3.10/3.12에서 lint와 테스트를 실행합니다.
 
 최근 검증 결과:
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 31 passed
+pytest             -> 40 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
