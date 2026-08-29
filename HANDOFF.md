@@ -118,7 +118,14 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
   모든 실행의 `isolation`이 `docker`인지 확인합니다(회귀 3종 시뮬레이션으로 검증함).
 - Dockerfile 베이스 이미지를 digest로 고정했습니다.
 - `SECURITY.md`와 `.dockerignore`를 추가했습니다.
-- 테스트 6개 -> 40개.
+- `report` 서브커맨드를 추가했습니다. 감사 로그를 run 단위로 집계하고, 그동안 쓰이지 않던
+  catalog의 `technique` 필드로 ATT&CK 커버리지 표를 만듭니다. 미실행 technique은 `!` 표시.
+  `--json`으로 기계 판독 출력도 지원합니다.
+- 작성 중 두 개의 버그를 잡았습니다: (1) dry-run의 `planned` 상태를 실패로 집계하던 문제 ->
+  `executor.SUCCESS_STATUSES`로 정의를 공유. (2) `dataclasses.asdict`가 Counter를 items에서
+  재구성해 키를 튜플로 망가뜨리던 문제 -> `RunSummary.as_dict()`로 명시적 직렬화.
+- GitHub Actions 액션 버전을 갱신했습니다(Node 20 deprecation).
+- 테스트 6개 -> 50개.
 
 ## 6. 다음 세션 우선순위
 
@@ -130,10 +137,10 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
    정규화입니다.
 4. **능력 catalog 확장**: 새로운 low-risk discovery 능력부터 추가하고 각 항목에 negative test,
    timeout test, Docker 실행 검증을 함께 추가합니다.
-5. **대시보드 연동**: 현재 대시보드는 `make test`만 제공합니다. Caldera 전용 `run` action과
-   `.runtime/run.jsonl` 로그 표시를 추가할지 검토합니다.
-6. ~~**CI Docker smoke test**~~: 완료(5-1 참고). GitHub Actions에서 실제로 통과하는지는
-   푸시 후 확인이 필요합니다. 로컬에서 동일 절차를 재현해 검증했습니다.
+5. **대시보드 연동**: 현재 대시보드는 `make test`만 제공합니다. `caldera-lab report --json`
+   출력을 그대로 쓸 수 있으므로 이를 대시보드에 노출할지 검토합니다.
+6. ~~**CI Docker smoke test**~~: 완료. GitHub Actions에서 통과 확인함(run 33231936058,
+   docker-smoke 15s).
 
 7. **LICENSE 미정**: 아직 없습니다. 공개 저장소이므로 선택이 필요합니다.
 

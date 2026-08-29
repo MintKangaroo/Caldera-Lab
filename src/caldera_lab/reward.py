@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import asdict, dataclass
 
-from .executor import ExecutionResult
+from .executor import SUCCESS_STATUSES, ExecutionResult
 from .policy import LabPolicy
 
 
@@ -54,7 +54,7 @@ class RewardModel:
         return [" ".join(line.split()) for line in stdout.splitlines() if line.strip()]
 
     def score(self, result: ExecutionResult, policy: LabPolicy) -> RewardBreakdown:
-        succeeded = result.status in {"succeeded", "planned"}
+        succeeded = result.status in SUCCESS_STATUSES
         outcome = self.success_reward if succeeded else self.failure_penalty
 
         novel = 0

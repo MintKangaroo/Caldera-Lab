@@ -72,6 +72,17 @@ make run                         # dry-run
 PYTHONPATH=src python3 -m caldera_lab run --executor local --allow-local --steps 2
 ```
 
+실행 결과를 요약하려면:
+
+```bash
+PYTHONPATH=src python3 -m caldera_lab report --log .runtime/run.jsonl
+PYTHONPATH=src python3 -m caldera_lab report --json    # 기계 판독용
+```
+
+`report`는 감사 로그를 run 단위로 집계하고 catalog의 `technique` 필드로 MITRE ATT&CK
+커버리지를 만듭니다. 한 번도 성공하지 못한 technique은 `!`로 표시되며, planner fallback 사유와
+allowlist가 거부한 ID 목록도 함께 보여줍니다.
+
 `local` 실행기는 개발 전용이며 기본값이 아닙니다. 실제 랩 실행은 Docker executor를 사용하세요.
 
 베이스 이미지는 digest로 고정되어 있습니다. 갱신 시 CI의 `docker-smoke` 잡을 다시 통과시켜야
@@ -115,12 +126,13 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 40 passed
+pytest             -> 50 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
 Reward             -> 최초 실행 1.24, 동일 능력 반복 시 0.21 (정보 이득 1.0 -> 0.0)
 Docker smoke       -> 4 executions, 0 failures (digest 고정 이미지 기준)
+GitHub Actions     -> success (quality 3.10/3.12 + docker-smoke)
 ```
 
 ## 구조
@@ -134,6 +146,7 @@ Caldera_Lab/
 ├── src/caldera_lab/planner.py   # rule/LLM planner
 ├── src/caldera_lab/rl.py        # tabular Q policy + JSON 영속화
 ├── src/caldera_lab/reward.py    # 정보 이득 기반 보상
+├── src/caldera_lab/report.py    # 감사 로그 집계 + ATT&CK 커버리지
 ├── src/caldera_lab/policy.py    # risk/network/승인 게이트
 ├── src/caldera_lab/executor.py  # Docker/local/dry-run executor
 └── src/caldera_lab/orchestrator.py

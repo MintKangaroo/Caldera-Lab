@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from .catalog import AbilityCatalog
 from .executor import DockerLabExecutor, DryRunExecutor, LocalLabExecutor
 from .orchestrator import Orchestrator
+from .report import coverage, load_events, render, summarize
 
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = ROOT / "catalog" / "abilities.json"
@@ -16,6 +18,27 @@ def positive_int(value: str) -> int:
     if number < 1:
         raise argparse.ArgumentTypeError("--steps must be at least 1")
     return number
+
+
+def _report(
+    parser: argparse.ArgumentParser, catalog: AbilityCatalog, args: argparse.Namespace
+) -> None:
+    if not args.log.exists():
+        parser.error(f"audit log not found: {args.log}")
+    runs = summarize(load_events(args.log))
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "runs": {run_id: summary.as_dict() for run_id, summary in runs.items()},
+                    "coverage": coverage(catalog, runs),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+    print(render(catalog, runs))
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -44,10 +67,19 @@ def main(argv: list[str] | None = None) -> None:
     run.add_argument(
         "--allow-local", action="store_true", help="explicitly allow the development executor"
     )
+    report = sub.add_parser("report", help="summarise an audit log")
+    report.add_argument("--log", type=Path, default=Path(".runtime/run.jsonl"))
+    report.add_argument(
+        "--json", action="store_true", help="emit machine-readable output instead of a table"
+    )
+
     args = parser.parse_args(argv)
+    catalog = AbilityCatalog.from_json(CATALOG)
+    if args.command == "report":
+        _report(parser, catalog, args)
+        return
     if args.command != "run":
         return
-    catalog = AbilityCatalog.from_json(CATALOG)
     if args.executor == "docker":
         executor = DockerLabExecutor(workspace=args.workspace)
     elif args.executor == "dry-run":
