@@ -20,6 +20,8 @@ policy, Docker 경계, 감사 로그, 테스트를 함께 갱신해야 합니다
 - RL policy: tabular Q-policy가 허용된 능력 중 다음 능력을 선택하고 보상으로 업데이트합니다.
   state는 "완료한 능력 집합 + 마지막 결과"로 추상화되어 실행 간 재방문·재사용되며,
   Q table은 `--q-table`(기본 `.runtime/q_table.json`)에 저장됩니다.
+- 정보 이득 기반 보상: 종료 코드만 보지 않고 "새로 알아낸 사실"을 셉니다.
+  `total = outcome + information_gain - cost`이며, 항마다 감사 로그에 남습니다.
 - 실제 agent execution: 기본 실행기는 Docker 컨테이너이며 `network none`, read-only rootfs,
   `cap-drop ALL`, `no-new-privileges`, PID·메모리·CPU 제한, `--pull never`를 적용합니다.
 - 감사 가능성: 계획, 승인, 실행 결과를 `run_id`가 붙은 JSONL 이벤트 로그에 append합니다.
@@ -64,6 +66,12 @@ PYTHONPATH=src python3 -m caldera_lab run --executor local --allow-local --steps
 
 `local` 실행기는 개발 전용이며 기본값이 아닙니다. 실제 랩 실행은 Docker executor를 사용하세요.
 
+### 보상 설계의 알려진 한계
+
+정보 이득은 stdout 라인을 정규화해 중복을 판별합니다. 따라서 실행마다 값이 바뀌는 출력
+(`uname -a`의 컨테이너 hostname, `ps`의 PID·시각)은 실제로 새 정보가 아니어도 매번 novel로
+집계됩니다. 현재 동작은 테스트로 고정해 두었으므로, 개선 시 의도적으로 갱신해야 합니다.
+
 ## 안전 경계
 
 - catalog에 없는 능력 ID와 임의 shell 문자열은 거부합니다.
@@ -82,16 +90,18 @@ make check
 
 현재 테스트는 catalog 검증, planner fallback, LLM이 catalog 밖 ID를 반환할 때의 거부,
 CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 감사 로그 append와 `run_id`
-분리, RL state 추상화·Q table 왕복·손상된 table 거부·시드 재현성, local executor를 검증합니다. GitHub Actions는 Python 3.10/3.12에서 lint와 테스트를 실행합니다.
+분리, RL state 추상화·Q table 왕복·손상된 table 거부·시드 재현성, 보상의 정보 이득·중복
+감점·시간 비용 상한, local executor를 검증합니다. GitHub Actions는 Python 3.10/3.12에서 lint와 테스트를 실행합니다.
 
 최근 검증 결과:
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 23 passed
+pytest             -> 31 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
+Reward             -> 최초 실행 1.24, 동일 능력 반복 시 0.21 (정보 이득 1.0 -> 0.0)
 ```
 
 ## 구조
@@ -102,6 +112,7 @@ Caldera_Lab/
 ├── src/caldera_lab/catalog.py   # catalog parser
 ├── src/caldera_lab/planner.py   # rule/LLM planner
 ├── src/caldera_lab/rl.py        # tabular Q policy + JSON 영속화
+├── src/caldera_lab/reward.py    # 정보 이득 기반 보상
 ├── src/caldera_lab/policy.py    # risk/network/승인 게이트
 ├── src/caldera_lab/executor.py  # Docker/local/dry-run executor
 └── src/caldera_lab/orchestrator.py

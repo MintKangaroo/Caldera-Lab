@@ -10,6 +10,7 @@ from .catalog import AbilityCatalog
 from .executor import Executor
 from .planner import LLMPlanner, Plan, RulePlanner
 from .policy import LabPolicy
+from .reward import RewardModel
 from .rl import QPolicy
 
 
@@ -34,6 +35,7 @@ class Orchestrator:
         planner_mode: str = "hybrid",
         seed: int = 7,
         q_table_path: Path | None = None,
+        reward_model: RewardModel | None = None,
     ) -> None:
         self.catalog = catalog
         self.executor = executor
@@ -42,12 +44,14 @@ class Orchestrator:
             LLMPlanner(catalog) if planner_mode in {"llm", "hybrid"} else RulePlanner(catalog)
         )
         self.rl = QPolicy(catalog, seed=seed)
+        self.reward_model = reward_model or RewardModel()
         self.run_id = uuid.uuid4().hex[:12]
         self.q_table_path = q_table_path
         self.q_table_loaded = bool(q_table_path and self.rl.load(q_table_path))
 
     def run(self, steps: int, log_path: Path | None = None) -> list[Event]:
         limit = min(steps, self.policy.max_steps)
+        self.reward_model.reset()
         observations: tuple[str, ...] = ()
         used: set[str] = set()
         events: list[Event] = []
@@ -109,8 +113,16 @@ class Orchestrator:
             result = self.executor.execute(ability, self.policy)
             events.append(Event(now(), self.run_id, "ability.completed", asdict(result)))
             observations = (*observations, f"{ability.id}:{result.status}:{result.return_code}")
-            reward = 1.0 if result.status in {"succeeded", "planned"} else -1.0
-            self.rl.update(state, ability_id, reward, self.rl.state(observations))
+            breakdown = self.reward_model.score(result, self.policy)
+            events.append(
+                Event(
+                    now(),
+                    self.run_id,
+                    "reward.scored",
+                    {"ability_id": ability.id, **breakdown.as_details()},
+                )
+            )
+            self.rl.update(state, ability_id, breakdown.total, self.rl.state(observations))
             remaining = limit - index - 1
             if remaining:
                 plan = self.planner.plan(observations, remaining)

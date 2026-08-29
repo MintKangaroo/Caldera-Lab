@@ -102,7 +102,13 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
 - Q table을 JSON으로 영속화했습니다(`--q-table`, `--no-q-table`). catalog 지문이 다르거나
   손상되었거나 catalog 밖 action이 있으면 로드를 거부하고 빈 table로 시작합니다.
 - 사용되지 않던 마지막 replan 호출을 제거했습니다(LLM 모드에서 실행당 1회 절약).
-- 테스트 6개 -> 23개.
+- 보상을 재설계했습니다. 기존 성공 +1 / 실패 -1은 모든 능력이 성공하는 카탈로그에서
+  상수 신호라 Q값이 실행 순서만 인코딩했습니다. 이제
+  `total = outcome + information_gain - cost`이며 정보 이득은 stdout에서 새로 관측한
+  사실의 비율입니다(에피소드 단위로 초기화). 항별 분해는 `reward.scored` 이벤트로 남깁니다.
+- `ExecutionResult.duration_seconds`를 추가하고 시간 비용을 정책 timeout 대비로 상한했습니다.
+- 알려진 한계: 실행마다 변하는 출력(hostname, PID)은 novel로 집계됩니다. 테스트로 고정됨.
+- 테스트 6개 -> 31개.
 
 ## 6. 다음 세션 우선순위
 
@@ -110,8 +116,8 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
    loopback 전용 heartbeat/result protocol을 추가하되, 외부 bind와 임의 command 전달은 금지합니다.
 2. **LLM planner 계약 강화**: Responses API의 구조화 출력(JSON schema)을 사용하고, timeout·재시도·
    사용량 메타데이터를 감사 이벤트에 기록합니다.
-3. ~~**RL 학습 지속성**~~: 완료(5-1 참고). 남은 것은 보상 설계입니다. 현재 보상은
-   성공 +1 / 실패 -1뿐이라 "새 정보를 얻었는지"를 반영하지 않습니다.
+3. ~~**RL 학습 지속성**~~, ~~**보상 설계**~~: 완료(5-1 참고). 남은 것은 변동성 출력의
+   정규화입니다.
 4. **능력 catalog 확장**: 새로운 low-risk discovery 능력부터 추가하고 각 항목에 negative test,
    timeout test, Docker 실행 검증을 함께 추가합니다.
 5. **대시보드 연동**: 현재 대시보드는 `make test`만 제공합니다. Caldera 전용 `run` action과

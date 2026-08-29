@@ -8,10 +8,11 @@ import pytest
 from caldera_lab import cli
 from caldera_lab import planner as planner_module
 from caldera_lab.catalog import AbilityCatalog
-from caldera_lab.executor import DryRunExecutor, LocalLabExecutor
+from caldera_lab.executor import DryRunExecutor, ExecutionResult, LocalLabExecutor
 from caldera_lab.orchestrator import Orchestrator
 from caldera_lab.planner import LLMPlanner, RulePlanner
 from caldera_lab.policy import LabPolicy
+from caldera_lab.reward import RewardModel
 from caldera_lab.rl import QPolicy
 
 ROOT = Path(__file__).parents[1]
@@ -309,3 +310,85 @@ def test_runs_are_reproducible_for_a_seed(catalog: AbilityCatalog) -> None:
         ]
 
     assert choices() == choices()
+
+
+def _result(stdout: str, status: str = "succeeded", duration: float = 0.0) -> ExecutionResult:
+    return ExecutionResult("collect-host-identity", status, stdout, "", 0, "dry-run", duration)
+
+
+def test_reward_pays_for_new_facts_and_not_for_repeats() -> None:
+    model = RewardModel()
+    policy = LabPolicy()
+    first = model.score(_result("uid=0\ngid=0\n"), policy)
+    assert first.novel_facts == 2 and first.known_facts == 0
+    assert first.information_gain == 1.0
+
+    repeat = model.score(_result("uid=0\ngid=0\n"), policy)
+    assert repeat.novel_facts == 0 and repeat.known_facts == 2
+    assert repeat.information_gain == 0.0
+    assert repeat.total < first.total
+
+
+def test_reward_is_partial_when_output_is_partly_new() -> None:
+    model = RewardModel()
+    model.score(_result("alpha\n"), LabPolicy())
+    mixed = model.score(_result("alpha\nbeta\n"), LabPolicy())
+    assert (mixed.novel_facts, mixed.known_facts) == (1, 1)
+    assert mixed.information_gain == 0.5
+
+
+def test_reward_ignores_whitespace_differences() -> None:
+    model = RewardModel()
+    model.score(_result("uid=0   gid=0\n"), LabPolicy())
+    assert model.score(_result("  uid=0 gid=0  \n"), LabPolicy()).novel_facts == 0
+
+
+def test_reward_penalises_failure_and_grants_no_information() -> None:
+    breakdown = RewardModel().score(_result("anything\n", status="failed"), LabPolicy())
+    assert breakdown.outcome == -1.0
+    assert breakdown.information_gain == 0.0
+    assert breakdown.total < 0
+
+
+def test_reward_charges_for_time_against_the_policy_budget() -> None:
+    policy = LabPolicy(timeout_seconds=10)
+    cheap = RewardModel().score(_result("x\n", duration=0.0), policy)
+    slow = RewardModel().score(_result("x\n", duration=10.0), policy)
+    assert cheap.cost == 0.0
+    assert slow.cost == 0.25
+    assert slow.total < cheap.total
+    # Cost is capped, so an overrun cannot dominate the signal.
+    assert RewardModel().score(_result("x\n", duration=999.0), policy).cost == 0.25
+
+
+def test_reward_novelty_is_per_episode(catalog: AbilityCatalog) -> None:
+    model = RewardModel()
+    model.score(_result("uid=0\n"), LabPolicy())
+    model.reset()
+    assert model.score(_result("uid=0\n"), LabPolicy()).novel_facts == 1
+
+
+def test_orchestrator_resets_novelty_between_runs(catalog: AbilityCatalog) -> None:
+    orchestrator = Orchestrator(catalog, DryRunExecutor(), planner_mode="rules")
+
+    def gains() -> list[float]:
+        return [
+            float(event.details["information_gain"])
+            for event in orchestrator.run(4)
+            if event.event == "reward.scored"
+        ]
+
+    assert gains() == gains()
+
+
+def test_reward_counts_volatile_output_as_new_information() -> None:
+    """Known limitation: output that changes every run always looks informative.
+
+    `uname -a` embeds the container hostname, so a repeat scores full gain.
+    Pinned here so a future fix has to update this deliberately.
+    """
+    model = RewardModel()
+    policy = LabPolicy()
+    model.score(_result("Linux 1e79fc82fa62 6.18.33.2 x86_64\n"), policy)
+    repeat = model.score(_result("Linux f89550a4fead 6.18.33.2 x86_64\n"), policy)
+    assert repeat.information_gain == 1.0
