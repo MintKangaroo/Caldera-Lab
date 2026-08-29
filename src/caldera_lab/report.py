@@ -23,6 +23,8 @@ class RunSummary:
     reward_total: float = 0.0
     information_gain: float = 0.0
     duration_seconds: float = 0.0
+    agents: Counter[str] = field(default_factory=Counter)
+    beacon_tasks: int = 0
 
     @property
     def executions(self) -> int:
@@ -46,6 +48,8 @@ class RunSummary:
             "succeeded": dict(self.succeeded),
             "failed": dict(self.failed),
             "isolations": dict(self.isolations),
+            "agents": dict(self.agents),
+            "beacon_tasks": self.beacon_tasks,
             "reward_total": round(self.reward_total, 6),
             "information_gain": round(self.information_gain, 6),
             "duration_seconds": round(self.duration_seconds, 3),
@@ -92,6 +96,15 @@ def summarize(events: list[dict[str, object]]) -> dict[str, RunSummary]:
             bucket[ability_id] += 1
             summary.isolations[str(details.get("isolation", "unknown"))] += 1
             summary.duration_seconds += float(details.get("duration_seconds") or 0.0)
+        elif name in {"agent.registered", "agent.tasked", "agent.reported"}:
+            summary.agents[str(details.get("agent_id", "unknown"))] += 1
+            if name == "agent.tasked" and details.get("ability_id"):
+                summary.beacon_tasks += 1
+            if name == "agent.reported":
+                ability_id = str(details.get("ability_id", "unknown"))
+                status = str(details.get("status", ""))
+                bucket = summary.succeeded if status in SUCCESS_STATUSES else summary.failed
+                bucket[ability_id] += 1
         elif name == "reward.scored":
             summary.reward_total += float(details.get("total") or 0.0)
             summary.information_gain += float(details.get("information_gain") or 0.0)
@@ -148,6 +161,10 @@ def render(catalog: AbilityCatalog, runs: dict[str, RunSummary]) -> str:
         rejected.update(summary.rejected_ability_ids)
     lines.append("isolation: " + (_counter_line(isolations) or "none"))
     lines.append("planner: " + (_counter_line(sources) or "none"))
+    agents = sum(len(summary.agents) for summary in runs.values())
+    tasks = sum(summary.beacon_tasks for summary in runs.values())
+    if agents:
+        lines.append(f"agents: {agents} beaconing, {tasks} ability tasks dispatched")
     if fallbacks:
         lines.append("planner fallbacks: " + _counter_line(fallbacks))
     if rejected:

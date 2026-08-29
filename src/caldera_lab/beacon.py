@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import json
 import secrets
+import sys
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from .catalog import AbilityCatalog
 
 LOOPBACK = "127.0.0.1"
 MAX_BODY_BYTES = 256 * 1024
+CONNECTION_TIMEOUT_SECONDS = 10.0
 
 
 class BeaconRefused(ValueError):
@@ -36,7 +39,12 @@ class BeaconState:
     into the lab. This is the same boundary the LLM planner sits behind.
     """
 
-    def __init__(self, catalog: AbilityCatalog, queue: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        catalog: AbilityCatalog,
+        queue: tuple[str, ...] = (),
+        on_event: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> None:
         self.catalog = catalog
         for ability_id in queue:
             self.catalog.get(ability_id)
@@ -44,10 +52,17 @@ class BeaconState:
         self.agents: dict[str, AgentRecord] = {}
         self.token = secrets.token_urlsafe(32)
         self._lock = threading.Lock()
+        self._on_event = on_event
+
+    def _emit(self, name: str, details: dict[str, Any]) -> None:
+        if self._on_event is not None:
+            self._on_event(name, details)
 
     def register(self, agent_id: str) -> dict[str, Any]:
         with self._lock:
+            fresh = agent_id not in self.agents
             self.agents.setdefault(agent_id, AgentRecord(agent_id))
+        self._emit("agent.registered", {"agent_id": agent_id, "first_time": fresh})
         return {"agent_id": agent_id, "abilities": list(self.catalog.ids())}
 
     def next_ability(self, agent_id: str) -> dict[str, Any]:
@@ -57,6 +72,17 @@ class BeaconState:
                 raise UnknownAgent(agent_id)
             record.registered_at_beacons += 1
             ability_id = self.queue.pop(0) if self.queue else None
+            beacons = record.registered_at_beacons
+            remaining = len(self.queue)
+        self._emit(
+            "agent.tasked",
+            {
+                "agent_id": agent_id,
+                "ability_id": ability_id,
+                "beacon": beacons,
+                "queue_remaining": remaining,
+            },
+        )
         return {"ability_id": ability_id}
 
     def record_result(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -76,15 +102,26 @@ class BeaconState:
             record = self.agents.get(agent_id)
             if record is None:
                 raise UnknownAgent(agent_id)
-            record.results.append(
-                {
-                    "ability_id": ability_id,
-                    "status": str(payload.get("status", "unknown")),
-                    "return_code": int(payload.get("return_code", -1)),
-                    "stdout": str(payload.get("stdout", ""))[:MAX_BODY_BYTES],
-                    "stderr": str(payload.get("stderr", ""))[:MAX_BODY_BYTES],
-                }
-            )
+            entry = {
+                "ability_id": ability_id,
+                "status": str(payload.get("status", "unknown")),
+                "return_code": int(payload.get("return_code", -1)),
+                "stdout": str(payload.get("stdout", ""))[:MAX_BODY_BYTES],
+                "stderr": str(payload.get("stderr", ""))[:MAX_BODY_BYTES],
+            }
+            record.results.append(entry)
+        # Output stays in the agent record; the audit event carries the shape of
+        # what happened, not a second copy of every byte collected.
+        self._emit(
+            "agent.reported",
+            {
+                "agent_id": agent_id,
+                "ability_id": ability_id,
+                "status": entry["status"],
+                "return_code": entry["return_code"],
+                "stdout_bytes": len(entry["stdout"]),
+            },
+        )
         return {"accepted": True}
 
 
@@ -92,6 +129,9 @@ class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "caldera-lab"
     sys_version = ""
+    # Keep-alive connections are held open between beacons; without a timeout an
+    # idle agent occupies its worker thread indefinitely.
+    timeout = CONNECTION_TIMEOUT_SECONDS
 
     @property
     def state(self) -> BeaconState:
@@ -159,6 +199,18 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(405, {"error": "method not allowed"})
 
 
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request: object, client_address: object) -> None:
+        # An agent dropping its connection is ordinary, not an incident. Dumping
+        # a traceback for it would bury anything that actually matters.
+        exc = sys.exc_info()[0]
+        if exc is not None and issubclass(exc, (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)  # type: ignore[arg-type]
+
+
 class BeaconServer:
     """A loopback-only coordination endpoint for lab agents."""
 
@@ -166,7 +218,10 @@ class BeaconServer:
         if host != LOOPBACK:
             raise BeaconRefused(f"the beacon server binds {LOOPBACK} only, refused: {host}")
         self.state = state
-        self._server = HTTPServer((host, port), _Handler)
+        # Threaded: the handler speaks HTTP/1.1, so a single agent holding an
+        # idle keep-alive connection would otherwise block every other agent
+        # until its socket timed out.
+        self._server = _Server((host, port), _Handler)
         self._server.state = state  # type: ignore[attr-defined]
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 

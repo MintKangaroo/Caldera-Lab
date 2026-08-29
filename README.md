@@ -28,7 +28,8 @@ policy, Docker 경계, 감사 로그, 테스트를 함께 갱신해야 합니다
 - 실제 agent execution: 기본 실행기는 Docker 컨테이너이며 `network none`, read-only rootfs,
   `cap-drop ALL`, `no-new-privileges`, PID·메모리·CPU 제한, `--pull never`를 적용합니다.
 - 감사 가능성: 계획, 승인, 실행 결과를 `run_id`가 붙은 JSONL 이벤트 로그에 append합니다.
-- 에이전트 통신: loopback 전용 beacon 프로토콜. 명령이 아닌 ability ID만 전달합니다.
+- 에이전트 통신: loopback 전용 beacon 프로토콜. 명령이 아닌 ability ID만 전달하며,
+  다중 에이전트 동시 접속과 beacon 이벤트 감사 로그를 지원합니다.
 - 기본 능력은 `id`, `uname`, `ps`, read-only로 마운트한 `/workspace` 목록 수집뿐입니다.
 
 ```mermaid
@@ -77,7 +78,7 @@ PYTHONPATH=src python3 -m caldera_lab run --executor local --allow-local --steps
 에이전트 통신 계층을 통해 실행하려면:
 
 ```bash
-PYTHONPATH=src python3 -m caldera_lab serve --executor docker --steps 4
+PYTHONPATH=src python3 -m caldera_lab serve --executor docker --steps 4 --agents 3
 ```
 
 beacon 서버는 `127.0.0.1`에만 바인드하며(다른 주소는 거부), 실행마다 새 토큰을 발급하고
@@ -87,6 +88,10 @@ beacon 서버는 `127.0.0.1`에만 바인드하며(다른 주소는 거부), 실
 
 beacon을 쓰는 주체는 컨테이너가 아니라 **랩 측 supervisor 프로세스**입니다. 컨테이너 안에서는
 소켓이 전혀 필요 없으므로 `--network none`이 그대로 유지됩니다.
+
+`--agents N`으로 여러 에이전트를 동시에 붙일 수 있습니다. 큐는 락 아래에서 분배되므로 같은
+능력이 두 에이전트에 배정되지 않습니다. `agent.registered` / `agent.tasked` / `agent.reported`
+이벤트가 `run_id`와 함께 감사 로그에 append되며, `report`가 이를 집계합니다.
 
 실행 결과를 요약하려면:
 
@@ -157,13 +162,14 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 69 passed
+pytest             -> 74 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
 Reward             -> 최초 실행 1.24, 동일 능력 반복 시 0.24 (4개 능력 모두 정보 이득 0.0)
 Docker smoke       -> 4 executions, 0 failures (digest 고정 이미지 기준)
 Beacon             -> 127.0.0.1 전용 바인드, 4/4 실행 (컨테이너는 --network none 유지)
+Multi-agent        -> 3 에이전트 동시 실행, 중복 배정 0건, 14 beacon 이벤트 기록
 GitHub Actions     -> success (quality 3.10/3.12 + docker-smoke)
 ```
 

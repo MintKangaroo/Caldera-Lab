@@ -38,6 +38,11 @@ that weakens one as a security change, not a refactor.
   compromised server cannot introduce a command into the lab.
 - Agents beacon from the lab side, not from inside the sandbox, so containers
   keep `--network none`.
+- The server is threaded with a per-connection timeout, so one agent holding an
+  idle keep-alive socket cannot stall the others.
+- Beacon activity is audited: agent.registered, agent.tasked, and
+  agent.reported are appended to the run's JSONL log. The reported event
+  carries the shape of a result, not a second copy of the collected output.
 - The `local` executor bypasses container isolation and is development-only.
   The CLI refuses it without `--allow-local`.
 - Plans, approvals, executions, and rewards are appended to a JSONL audit log

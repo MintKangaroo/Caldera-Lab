@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import http.client
 import json
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -813,13 +815,122 @@ def test_agent_still_applies_the_local_policy(catalog: AbilityCatalog) -> None:
         server.stop()
 
 
-def test_serve_cli_runs_a_full_cycle(capsys) -> None:
-    cli.main(["serve", "--executor", "dry-run", "--steps", "3"])
+def test_serve_cli_runs_a_full_cycle(tmp_path: Path, capsys) -> None:
+    # An explicit --log keeps the test off the repository's real runtime log.
+    cli.main(
+        ["serve", "--executor", "dry-run", "--steps", "3", "--log", str(tmp_path / "run.jsonl")]
+    )
     out = capsys.readouterr().out
     assert "http://127.0.0.1:" in out
-    assert "executed 3 abilities" in out
+    assert "ran 3 abilities" in out
 
 
 def test_serve_cli_honours_the_local_executor_gate() -> None:
     with pytest.raises(SystemExit):
         cli.main(["serve", "--executor", "local", "--steps", "1"])
+
+
+def test_beacon_does_not_block_on_an_idle_keepalive_connection(beacon) -> None:
+    """One agent holding a connection open must not stall every other agent."""
+    server, _ = beacon
+    host, port = server.url.removeprefix("http://").split(":")
+    headers = {"Content-Type": "application/json", "X-Caldera-Token": server.token}
+
+    holder = http.client.HTTPConnection(host, int(port), timeout=10)
+    holder.request("POST", "/register", json.dumps({"agent_id": "holder"}), headers)
+    assert holder.getresponse().status == 200
+    try:
+        # The holder's keep-alive socket is still open and idle here.
+        other = http.client.HTTPConnection(host, int(port), timeout=5)
+        other.request("POST", "/register", json.dumps({"agent_id": "other"}), headers)
+        assert other.getresponse().status == 200
+        other.close()
+    finally:
+        holder.close()
+
+
+def test_concurrent_agents_never_receive_the_same_ability(catalog: AbilityCatalog) -> None:
+    state = BeaconState(catalog, queue=catalog.ids())
+    server = BeaconServer(state).start()
+    try:
+        agents = [
+            BeaconAgent(catalog, DryRunExecutor(), server.url, server.token, LabPolicy())
+            for _ in range(4)
+        ]
+        executed: list[list[str]] = []
+        threads = [
+            threading.Thread(target=lambda a=agent: executed.append(a.run(max_beacons=8)))
+            for agent in agents
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=20)
+        assert all(not thread.is_alive() for thread in threads)
+        assigned = [ability for run in executed for ability in run]
+        assert sorted(assigned) == sorted(catalog.ids())
+        assert len(assigned) == len(set(assigned))
+    finally:
+        server.stop()
+
+
+def test_beacon_emits_audit_events(catalog: AbilityCatalog) -> None:
+    seen: list[tuple[str, dict[str, object]]] = []
+    state = BeaconState(
+        catalog,
+        queue=("collect-host-identity",),
+        on_event=lambda name, details: seen.append((name, details)),
+    )
+    server = BeaconServer(state).start()
+    try:
+        agent = BeaconAgent(catalog, DryRunExecutor(), server.url, server.token, LabPolicy())
+        agent.run(max_beacons=2)
+    finally:
+        server.stop()
+    names = [name for name, _ in seen]
+    assert names[0] == "agent.registered"
+    assert "agent.tasked" in names and "agent.reported" in names
+    tasked = next(details for name, details in seen if name == "agent.tasked")
+    assert tasked["ability_id"] == "collect-host-identity"
+    assert tasked["queue_remaining"] == 0
+    reported = next(details for name, details in seen if name == "agent.reported")
+    # The event describes the result; it does not duplicate the collected bytes.
+    assert "stdout" not in reported
+    assert reported["stdout_bytes"] > 0
+
+
+def test_serve_cli_writes_beacon_events_to_the_audit_log(tmp_path: Path, capsys) -> None:
+    log = tmp_path / "events.jsonl"
+    cli.main(
+        ["serve", "--executor", "dry-run", "--steps", "4", "--agents", "3", "--log", str(log)]
+    )
+    capsys.readouterr()
+    records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert len({record["run_id"] for record in records}) == 1
+    assert {record["event"] for record in records} == {
+        "agent.registered",
+        "agent.tasked",
+        "agent.reported",
+    }
+    reported = [r for r in records if r["event"] == "agent.reported"]
+    assert len(reported) == 4
+    # Three agents shared one queue of four; none of them ran the same ability.
+    assert len({r["details"]["ability_id"] for r in reported}) == 4
+    assert len({r["details"]["agent_id"] for r in records}) == 3
+
+
+def test_report_summarises_a_beacon_run(catalog: AbilityCatalog, tmp_path: Path, capsys) -> None:
+    log = tmp_path / "events.jsonl"
+    cli.main(
+        ["serve", "--executor", "dry-run", "--steps", "4", "--agents", "2", "--log", str(log)]
+    )
+    capsys.readouterr()
+    runs = summarize(load_events(log))
+    summary = next(iter(runs.values()))
+    assert len(summary.agents) == 2
+    assert summary.beacon_tasks == 4
+    assert summary.executions == 4
+    rendered = render(catalog, runs)
+    assert "agents: 2 beaconing, 4 ability tasks dispatched" in rendered
+    # Coverage is derived from beacon results as well as orchestrator runs.
+    assert all(row["successes"] == 1 for row in coverage(catalog, runs))
