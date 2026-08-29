@@ -27,6 +27,15 @@ def main(argv: list[str] | None = None) -> None:
     run.add_argument("--steps", type=positive_int, default=4)
     run.add_argument("--log", type=Path, default=Path(".runtime/run.jsonl"))
     run.add_argument(
+        "--q-table",
+        type=Path,
+        default=Path(".runtime/q_table.json"),
+        help="JSON file the RL policy is loaded from and saved to",
+    )
+    run.add_argument(
+        "--no-q-table", action="store_true", help="run without loading or saving RL state"
+    )
+    run.add_argument(
         "--workspace",
         type=Path,
         default=None,
@@ -47,6 +56,12 @@ def main(argv: list[str] | None = None) -> None:
         executor = LocalLabExecutor()
     else:
         parser.error("--executor local requires --allow-local")
-    events = Orchestrator(catalog, executor, planner_mode=args.planner).run(args.steps, args.log)
+    orchestrator = Orchestrator(
+        catalog,
+        executor,
+        planner_mode=args.planner,
+        q_table_path=None if args.no_q_table else args.q_table,
+    )
+    events = orchestrator.run(args.steps, args.log)
     for event in events:
         print(f"{event.timestamp} {event.event} {event.details}")

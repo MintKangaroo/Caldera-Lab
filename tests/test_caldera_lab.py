@@ -12,6 +12,7 @@ from caldera_lab.executor import DryRunExecutor, LocalLabExecutor
 from caldera_lab.orchestrator import Orchestrator
 from caldera_lab.planner import LLMPlanner, RulePlanner
 from caldera_lab.policy import LabPolicy
+from caldera_lab.rl import QPolicy
 
 ROOT = Path(__file__).parents[1]
 
@@ -46,7 +47,9 @@ def test_orchestrator_dry_run_writes_auditable_events(
     assert [event.event for event in events].count("ability.approved") == 3
     records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
     assert records[0]["event"] == "plan.created"
-    assert all(record["details"]["isolation"] == "dry-run" for record in records[2::2])
+    completed = [record for record in records if record["event"] == "ability.completed"]
+    assert len(completed) == 3
+    assert all(record["details"]["isolation"] == "dry-run" for record in completed)
 
 
 def test_local_executor_runs_without_a_shell(catalog: AbilityCatalog, tmp_path: Path) -> None:
@@ -202,3 +205,107 @@ def test_audit_log_appends_across_runs(catalog: AbilityCatalog, tmp_path: Path) 
     assert len(records) == len(first) + len(second)
     run_ids = {record["run_id"] for record in records}
     assert len(run_ids) == 2
+
+
+def test_state_is_bounded_and_revisited(catalog: AbilityCatalog) -> None:
+    policy = QPolicy(catalog)
+    # Order of arrival must not matter: the same completed set is the same state.
+    forward = policy.state(("collect-host-identity:succeeded:0", "collect-system-info:succeeded:0"))
+    reverse = policy.state(("collect-system-info:succeeded:0", "collect-host-identity:succeeded:0"))
+    assert forward == reverse
+    assert forward == "1100|succeeded"
+    # A failure is a different state than a success over the same set.
+    assert policy.state(("collect-host-identity:failed:1",)) != policy.state(
+        ("collect-host-identity:succeeded:0",)
+    )
+    assert policy.state(()) == "0000|none"
+
+
+def test_learning_reaches_entries_it_has_already_written(catalog: AbilityCatalog) -> None:
+    policy = QPolicy(catalog)
+    state = policy.state(("collect-host-identity:succeeded:0",))
+    policy.update(state, "collect-system-info", 1.0, policy.state(()))
+    learned = policy.q[(state, "collect-system-info")]
+    assert learned > 0.0
+    # The same observation history must land on the same key, not a fresh one.
+    again = policy.state(("collect-host-identity:succeeded:0",))
+    assert policy.q.get((again, "collect-system-info")) == learned
+
+
+def test_q_table_round_trips(catalog: AbilityCatalog, tmp_path: Path) -> None:
+    path = tmp_path / "q.json"
+    trained = QPolicy(catalog)
+    trained.update(trained.state(()), "collect-system-info", 1.0, trained.state(()))
+    trained.save(path)
+    restored = QPolicy(catalog)
+    assert restored.load(path) is True
+    assert restored.q == trained.q
+
+
+def test_q_table_is_rejected_when_the_catalog_changed(
+    catalog: AbilityCatalog, tmp_path: Path
+) -> None:
+    path = tmp_path / "q.json"
+    QPolicy(catalog).save(path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["catalog"] = "some-other-catalog"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    fresh = QPolicy(catalog)
+    assert fresh.load(path) is False
+    assert fresh.q == {}
+
+
+def test_q_table_is_rejected_when_corrupt(catalog: AbilityCatalog, tmp_path: Path) -> None:
+    path = tmp_path / "q.json"
+    path.write_text("{ not json", encoding="utf-8")
+    assert QPolicy(catalog).load(path) is False
+    path.write_text(json.dumps({"version": 1, "catalog": "x", "entries": "nope"}), encoding="utf-8")
+    assert QPolicy(catalog).load(path) is False
+
+
+def test_q_table_rejects_actions_outside_the_catalog(
+    catalog: AbilityCatalog, tmp_path: Path
+) -> None:
+    path = tmp_path / "q.json"
+    policy = QPolicy(catalog)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "catalog": policy.fingerprint(),
+                "entries": [{"state": "0000|none", "action": "rm -rf /", "value": 9.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert policy.load(path) is False
+    assert policy.q == {}
+
+
+def test_orchestrator_persists_learning_across_runs(
+    catalog: AbilityCatalog, tmp_path: Path
+) -> None:
+    table = tmp_path / "q.json"
+    first = Orchestrator(catalog, DryRunExecutor(), planner_mode="rules", q_table_path=table)
+    first.run(3)
+    assert first.q_table_loaded is False
+    assert table.exists()
+
+    second = Orchestrator(catalog, DryRunExecutor(), planner_mode="rules", q_table_path=table)
+    assert second.q_table_loaded is True
+    assert second.rl.q == first.rl.q
+    events = second.run(3)
+    loaded = next(event for event in events if event.event == "rl.loaded")
+    assert loaded.details["restored"] is True
+
+
+def test_runs_are_reproducible_for_a_seed(catalog: AbilityCatalog) -> None:
+    def choices() -> list[str]:
+        events = Orchestrator(catalog, DryRunExecutor(), planner_mode="rules", seed=11).run(4)
+        return [
+            str(event.details["ability_id"])
+            for event in events
+            if event.event == "ability.approved"
+        ]
+
+    assert choices() == choices()

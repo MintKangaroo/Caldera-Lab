@@ -18,6 +18,8 @@ policy, Docker 경계, 감사 로그, 테스트를 함께 갱신해야 합니다
 
 - LLM planner: 관찰 로그를 보고 다음 단계를 제안하지만, 결과는 로컬 allowlist로 재검증합니다.
 - RL policy: tabular Q-policy가 허용된 능력 중 다음 능력을 선택하고 보상으로 업데이트합니다.
+  state는 "완료한 능력 집합 + 마지막 결과"로 추상화되어 실행 간 재방문·재사용되며,
+  Q table은 `--q-table`(기본 `.runtime/q_table.json`)에 저장됩니다.
 - 실제 agent execution: 기본 실행기는 Docker 컨테이너이며 `network none`, read-only rootfs,
   `cap-drop ALL`, `no-new-privileges`, PID·메모리·CPU 제한, `--pull never`를 적용합니다.
 - 감사 가능성: 계획, 승인, 실행 결과를 `run_id`가 붙은 JSONL 이벤트 로그에 append합니다.
@@ -46,6 +48,8 @@ PYTHONPATH=src python3 -m caldera_lab run --executor docker --planner hybrid --s
 
 `--workspace <dir>`로 에이전트에 노출할 디렉터리를 지정합니다. 지정하지 않으면
 `.runtime/workspace`를 사용하며, 어느 경우든 컨테이너 안에서는 read-only입니다.
+학습 없이 실행하려면 `--no-q-table`을 씁니다. 저장된 table은 catalog 지문이 일치할 때만
+로드되며, 불일치·손상·catalog 밖 action이 있으면 조용히 무시하고 빈 table로 시작합니다.
 
 API 키가 없으면 `hybrid` planner는 결정론적 규칙 planner로 안전하게 fallback합니다.
 LLM 사용 시 `OPENAI_API_KEY`, 선택적으로 `CALDERA_LLM_MODEL`과
@@ -78,15 +82,16 @@ make check
 
 현재 테스트는 catalog 검증, planner fallback, LLM이 catalog 밖 ID를 반환할 때의 거부,
 CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 감사 로그 append와 `run_id`
-분리, RL 실행 루프, local executor를 검증합니다. GitHub Actions는 Python 3.10/3.12에서 lint와 테스트를 실행합니다.
+분리, RL state 추상화·Q table 왕복·손상된 table 거부·시드 재현성, local executor를 검증합니다. GitHub Actions는 Python 3.10/3.12에서 lint와 테스트를 실행합니다.
 
 최근 검증 결과:
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 15 passed
+pytest             -> 23 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
+RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
 ```
 
 ## 구조
@@ -96,7 +101,7 @@ Caldera_Lab/
 ├── catalog/abilities.json       # 허용된 능력 선언
 ├── src/caldera_lab/catalog.py   # catalog parser
 ├── src/caldera_lab/planner.py   # rule/LLM planner
-├── src/caldera_lab/rl.py        # tabular Q policy
+├── src/caldera_lab/rl.py        # tabular Q policy + JSON 영속화
 ├── src/caldera_lab/policy.py    # risk/network/승인 게이트
 ├── src/caldera_lab/executor.py  # Docker/local/dry-run executor
 └── src/caldera_lab/orchestrator.py

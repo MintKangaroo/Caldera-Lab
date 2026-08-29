@@ -97,20 +97,21 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
 - `cli.main(argv)`로 테스트 가능하게 만들고 `--steps` 양수 검증을 추가했습니다.
 - 이름과 다른 것을 검증하던 CLI 게이트 테스트를 실제 게이트 테스트로 교체하고,
   LLM이 catalog 밖 ID/shell 문자열을 반환하는 경우의 negative test를 추가했습니다.
-- 테스트 6개 -> 15개.
+- RL state를 관측 해시에서 "완료한 능력 집합 비트마스크 + 마지막 결과"로 추상화했습니다.
+  도달 가능한 고유 state가 633 -> 31로 줄고, 실행 간 동일 항목이 재방문되어 값이 수렴합니다.
+- Q table을 JSON으로 영속화했습니다(`--q-table`, `--no-q-table`). catalog 지문이 다르거나
+  손상되었거나 catalog 밖 action이 있으면 로드를 거부하고 빈 table로 시작합니다.
+- 사용되지 않던 마지막 replan 호출을 제거했습니다(LLM 모드에서 실행당 1회 절약).
+- 테스트 6개 -> 23개.
 
 ## 6. 다음 세션 우선순위
-
-0. **RL 설계 결함**: `rl.py`의 state는 누적 관측의 SHA256이라 모든 state가 유일해집니다.
-   Q 테이블 항목이 재방문되지 않아 학습이 사실상 ε-greedy 랜덤과 동일합니다. state를
-   추상화(수행 완료 ability 집합 등)한 뒤에 아래 3번(영속화)을 진행해야 의미가 있습니다.
 
 1. **에이전트 통신 계층**: 현재는 CLI가 Docker executor를 직접 호출합니다. 다음 단계로
    loopback 전용 heartbeat/result protocol을 추가하되, 외부 bind와 임의 command 전달은 금지합니다.
 2. **LLM planner 계약 강화**: Responses API의 구조화 출력(JSON schema)을 사용하고, timeout·재시도·
    사용량 메타데이터를 감사 이벤트에 기록합니다.
-3. **RL 학습 지속성**: 현재 Q table은 실행 프로세스 메모리에만 있습니다. 허용된 state/action만
-   저장하는 버전 관리 가능한 JSON artifact와 재현성 테스트를 추가합니다.
+3. ~~**RL 학습 지속성**~~: 완료(5-1 참고). 남은 것은 보상 설계입니다. 현재 보상은
+   성공 +1 / 실패 -1뿐이라 "새 정보를 얻었는지"를 반영하지 않습니다.
 4. **능력 catalog 확장**: 새로운 low-risk discovery 능력부터 추가하고 각 항목에 negative test,
    timeout test, Docker 실행 검증을 함께 추가합니다.
 5. **대시보드 연동**: 현재 대시보드는 `make test`만 제공합니다. Caldera 전용 `run` action과
