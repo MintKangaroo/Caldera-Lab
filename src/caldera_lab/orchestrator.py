@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ from .catalog import AbilityCatalog
 from .executor import Executor
 from .planner import LLMPlanner, Plan, RulePlanner
 from .policy import LabPolicy
+from .reward import RewardModel
 from .rl import QPolicy
 
 
@@ -19,6 +21,7 @@ def now() -> str:
 @dataclass(frozen=True)
 class Event:
     timestamp: str
+    run_id: str
     event: str
     details: dict[str, object]
 
@@ -31,6 +34,8 @@ class Orchestrator:
         policy: LabPolicy | None = None,
         planner_mode: str = "hybrid",
         seed: int = 7,
+        q_table_path: Path | None = None,
+        reward_model: RewardModel | None = None,
     ) -> None:
         self.catalog = catalog
         self.executor = executor
@@ -39,9 +44,14 @@ class Orchestrator:
             LLMPlanner(catalog) if planner_mode in {"llm", "hybrid"} else RulePlanner(catalog)
         )
         self.rl = QPolicy(catalog, seed=seed)
+        self.reward_model = reward_model or RewardModel()
+        self.run_id = uuid.uuid4().hex[:12]
+        self.q_table_path = q_table_path
+        self.q_table_loaded = bool(q_table_path and self.rl.load(q_table_path))
 
     def run(self, steps: int, log_path: Path | None = None) -> list[Event]:
         limit = min(steps, self.policy.max_steps)
+        self.reward_model.reset()
         observations: tuple[str, ...] = ()
         used: set[str] = set()
         events: list[Event] = []
@@ -49,11 +59,25 @@ class Orchestrator:
         events.append(
             Event(
                 now(),
+                self.run_id,
                 "plan.created",
                 {
                     "source": plan.source,
                     "rationale": plan.rationale,
                     "abilities": plan.ability_ids,
+                    "diagnostics": plan.diagnostics,
+                },
+            )
+        )
+        events.append(
+            Event(
+                now(),
+                self.run_id,
+                "rl.loaded",
+                {
+                    "path": str(self.q_table_path) if self.q_table_path else None,
+                    "restored": self.q_table_loaded,
+                    "entries": len(self.rl.q),
                 },
             )
         )
@@ -78,6 +102,7 @@ class Orchestrator:
             events.append(
                 Event(
                     now(),
+                    self.run_id,
                     "ability.approved",
                     {
                         "index": index,
@@ -87,15 +112,48 @@ class Orchestrator:
                 )
             )
             result = self.executor.execute(ability, self.policy)
-            events.append(Event(now(), "ability.completed", asdict(result)))
+            events.append(Event(now(), self.run_id, "ability.completed", asdict(result)))
             observations = (*observations, f"{ability.id}:{result.status}:{result.return_code}")
-            reward = 1.0 if result.status in {"succeeded", "planned"} else -1.0
-            self.rl.update(state, ability_id, reward, self.rl.state(observations))
-            plan = self.planner.plan(observations, limit - index - 1)
+            breakdown = self.reward_model.score(result, self.policy)
+            events.append(
+                Event(
+                    now(),
+                    self.run_id,
+                    "reward.scored",
+                    {"ability_id": ability.id, **breakdown.as_details()},
+                )
+            )
+            self.rl.update(state, ability_id, breakdown.total, self.rl.state(observations))
+            remaining = limit - index - 1
+            if remaining:
+                plan = self.planner.plan(observations, remaining)
+                if plan.diagnostics:
+                    events.append(
+                        Event(
+                            now(),
+                            self.run_id,
+                            "plan.replanned",
+                            {
+                                "index": index,
+                                "source": plan.source,
+                                "abilities": plan.ability_ids,
+                                "diagnostics": plan.diagnostics,
+                            },
+                        )
+                    )
+        if self.q_table_path:
+            self.rl.save(self.q_table_path)
+            events.append(
+                Event(
+                    now(),
+                    self.run_id,
+                    "rl.saved",
+                    {"path": str(self.q_table_path), "entries": len(self.rl.q)},
+                )
+            )
         if log_path:
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            serialized = "\n".join(
-                json.dumps(asdict(item), ensure_ascii=False) for item in events
-            )
-            log_path.write_text(serialized + "\n", encoding="utf-8")
+            with log_path.open("a", encoding="utf-8") as handle:
+                for item in events:
+                    handle.write(json.dumps(asdict(item), ensure_ascii=False) + "\n")
         return events

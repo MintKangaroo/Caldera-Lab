@@ -17,11 +17,17 @@ policy, Docker 경계, 감사 로그, 테스트를 함께 갱신해야 합니다
 ## 핵심 차별점
 
 - LLM planner: 관찰 로그를 보고 다음 단계를 제안하지만, 결과는 로컬 allowlist로 재검증합니다.
+  요청은 catalog ID만 허용하는 JSON schema로 제약하며, 실패는 조용히 넘어가지 않고
+  사유·재시도·지연·토큰 사용량을 `plan.created` / `plan.replanned` 이벤트에 남깁니다.
 - RL policy: tabular Q-policy가 허용된 능력 중 다음 능력을 선택하고 보상으로 업데이트합니다.
+  state는 "완료한 능력 집합 + 마지막 결과"로 추상화되어 실행 간 재방문·재사용되며,
+  Q table은 `--q-table`(기본 `.runtime/q_table.json`)에 저장됩니다.
+- 정보 이득 기반 보상: 종료 코드만 보지 않고 "새로 알아낸 사실"을 셉니다.
+  `total = outcome + information_gain - cost`이며, 항마다 감사 로그에 남습니다.
 - 실제 agent execution: 기본 실행기는 Docker 컨테이너이며 `network none`, read-only rootfs,
-  `cap-drop ALL`, `no-new-privileges`, PID 제한을 적용합니다.
-- 감사 가능성: 계획, 승인, 실행 결과를 JSONL 이벤트 로그로 남깁니다.
-- 기본 능력은 `id`, `uname`, `ps`, 명시적으로 마운트한 `/workspace` 목록 수집뿐입니다.
+  `cap-drop ALL`, `no-new-privileges`, PID·메모리·CPU 제한, `--pull never`를 적용합니다.
+- 감사 가능성: 계획, 승인, 실행 결과를 `run_id`가 붙은 JSONL 이벤트 로그에 append합니다.
+- 기본 능력은 `id`, `uname`, `ps`, read-only로 마운트한 `/workspace` 목록 수집뿐입니다.
 
 ```mermaid
 flowchart LR
@@ -44,9 +50,20 @@ docker build -t caldera-lab-agent:latest .
 PYTHONPATH=src python3 -m caldera_lab run --executor docker --planner hybrid --steps 4
 ```
 
-API 키가 없으면 `hybrid` planner는 결정론적 규칙 planner로 안전하게 fallback합니다.
-LLM 사용 시 `OPENAI_API_KEY`, 선택적으로 `CALDERA_LLM_MODEL`과
-`CALDERA_LLM_ENDPOINT`를 설정합니다. LLM은 명령을 만들 수 없고 catalog의 ID만 반환합니다.
+`--workspace <dir>`로 에이전트에 노출할 디렉터리를 지정합니다. 지정하지 않으면
+`.runtime/workspace`를 사용하며, 어느 경우든 컨테이너 안에서는 read-only입니다.
+학습 없이 실행하려면 `--no-q-table`을 씁니다. 저장된 table은 catalog 지문이 일치할 때만
+로드되며, 불일치·손상·catalog 밖 action이 있으면 조용히 무시하고 빈 table로 시작합니다.
+
+API 키가 없으면 `hybrid` planner는 결정론적 규칙 planner로 안전하게 fallback하며, 그
+사유(`no_api_key`)가 감사 로그에 남습니다. LLM 사용 시 `OPENAI_API_KEY`, 선택적으로
+`CALDERA_LLM_MODEL`과 `CALDERA_LLM_ENDPOINT`를 설정합니다. LLM은 명령을 만들 수 없고
+catalog의 ID만 반환합니다. 엔드포인트는 운영자가 바꿀 수 있으므로 schema 제약과 별개로
+로컬 allowlist가 최종 경계이며, 거부된 ID는 `rejected_ability_ids`로 기록됩니다.
+
+fallback 사유는 `no_api_key`, `transport_error`, `http_<code>`, `invalid_json_body`,
+`invalid_json_output`, `output_not_an_object`, `missing_ability_ids`, `no_allowlisted_ids`,
+`no_text_in_response`입니다.
 
 개발 중 Docker 없이 흐름만 확인하려면:
 
@@ -57,10 +74,18 @@ PYTHONPATH=src python3 -m caldera_lab run --executor local --allow-local --steps
 
 `local` 실행기는 개발 전용이며 기본값이 아닙니다. 실제 랩 실행은 Docker executor를 사용하세요.
 
+### 보상 설계의 알려진 한계
+
+정보 이득은 stdout 라인을 정규화해 중복을 판별합니다. 따라서 실행마다 값이 바뀌는 출력
+(`uname -a`의 컨테이너 hostname, `ps`의 PID·시각)은 실제로 새 정보가 아니어도 매번 novel로
+집계됩니다. 현재 동작은 테스트로 고정해 두었으므로, 개선 시 의도적으로 갱신해야 합니다.
+
 ## 안전 경계
 
 - catalog에 없는 능력 ID와 임의 shell 문자열은 거부합니다.
 - 기본 정책은 low-risk 능력, 최대 8단계, 단계별 timeout, 네트워크 비활성입니다.
+- `requires_network` 능력은 정책이 네트워크를 허용하지 않는 한 실행되지 않습니다.
+- `LabPolicy(approved_abilities=...)`로 catalog보다 좁은 승인 집합을 강제할 수 있습니다.
 - 컨테이너는 read-only rootfs와 capability 제거로 실행됩니다.
 - 이 저장소는 인터넷 스캔, 자격 증명 수집, 지속성 설치, 임의 파일 변경 능력을 제공하지 않습니다.
 - 반드시 소유하거나 명시적으로 허가된 격리 랩에서만 사용하세요.
@@ -71,16 +96,21 @@ PYTHONPATH=src python3 -m caldera_lab run --executor local --allow-local --steps
 make check
 ```
 
-현재 테스트는 catalog 검증, planner fallback, RL 실행 루프, JSONL 감사 로그,
-local executor를 검증합니다. GitHub Actions는 Python 3.10/3.12에서 lint와 테스트를 실행합니다.
+현재 테스트는 catalog 검증, planner fallback, LLM이 catalog 밖 ID를 반환할 때의 거부,
+CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 감사 로그 append와 `run_id`
+분리, RL state 추상화·Q table 왕복·손상된 table 거부·시드 재현성, 보상의 정보 이득·중복
+감점·시간 비용 상한, LLM planner의 schema 제약·재시도·fallback 사유 기록, local executor를
+검증합니다. GitHub Actions는 Python 3.10/3.12에서 lint와 테스트를 실행합니다.
 
 최근 검증 결과:
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 6 passed
-Docker execution   -> 2 abilities succeeded as uid=65534(nobody)
-GitHub Actions      -> success (Python 3.10 / 3.12)
+pytest             -> 40 passed
+Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
+Workspace mount    -> read-only enforced (touch -> Read-only file system)
+RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
+Reward             -> 최초 실행 1.24, 동일 능력 반복 시 0.21 (정보 이득 1.0 -> 0.0)
 ```
 
 ## 구조
@@ -90,7 +120,9 @@ Caldera_Lab/
 ├── catalog/abilities.json       # 허용된 능력 선언
 ├── src/caldera_lab/catalog.py   # catalog parser
 ├── src/caldera_lab/planner.py   # rule/LLM planner
-├── src/caldera_lab/rl.py        # tabular Q policy
+├── src/caldera_lab/rl.py        # tabular Q policy + JSON 영속화
+├── src/caldera_lab/reward.py    # 정보 이득 기반 보상
+├── src/caldera_lab/policy.py    # risk/network/승인 게이트
 ├── src/caldera_lab/executor.py  # Docker/local/dry-run executor
 └── src/caldera_lab/orchestrator.py
 ```

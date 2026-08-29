@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -20,6 +21,7 @@ class ExecutionResult:
     stderr: str
     return_code: int
     isolation: str
+    duration_seconds: float = 0.0
 
 
 class Executor(Protocol):
@@ -28,7 +30,9 @@ class Executor(Protocol):
 
 class DryRunExecutor:
     def execute(self, ability: Ability, policy: LabPolicy) -> ExecutionResult:
-        return ExecutionResult(ability.id, "planned", " ".join(ability.command), "", 0, "dry-run")
+        return ExecutionResult(
+            ability.id, "planned", " ".join(ability.command), "", 0, "dry-run", 0.0
+        )
 
 
 class LocalLabExecutor:
@@ -40,6 +44,7 @@ class LocalLabExecutor:
 
     def execute(self, ability: Ability, policy: LabPolicy) -> ExecutionResult:
         env = {"PATH": os.getenv("PATH", "/usr/bin:/bin"), "HOME": "/tmp"}
+        started = time.monotonic()
         try:
             completed = subprocess.run(
                 list(ability.command),
@@ -51,7 +56,9 @@ class LocalLabExecutor:
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return ExecutionResult(ability.id, "failed", "", str(exc), -1, "local-dev")
+            return ExecutionResult(
+                ability.id, "failed", "", str(exc), -1, "local-dev", time.monotonic() - started
+            )
         return ExecutionResult(
             ability.id,
             "succeeded" if completed.returncode == 0 else "failed",
@@ -59,18 +66,37 @@ class LocalLabExecutor:
             completed.stderr[-16_384:],
             completed.returncode,
             "local-dev",
+            round(time.monotonic() - started, 3),
         )
 
 
 class DockerLabExecutor:
-    def __init__(self, image: str = "caldera-lab-agent:latest") -> None:
+    """Runs one ability per throwaway container with no network and no privileges."""
+
+    def __init__(
+        self,
+        image: str = "caldera-lab-agent:latest",
+        workspace: Path | None = None,
+    ) -> None:
         self.image = image
+        # The catalog exposes a /workspace discovery ability, so the lab must actually
+        # mount one. It is bind-mounted read-only: the agent may list it, never write it.
+        self.workspace = workspace or Path(".runtime/workspace").resolve()
+        self.workspace.mkdir(parents=True, exist_ok=True)
 
     def execute(self, ability: Ability, policy: LabPolicy) -> ExecutionResult:
         command = [
             "docker",
             "run",
             "--rm",
+            "--pull",
+            "never",
+            "--memory",
+            "256m",
+            "--cpus",
+            "1.0",
+            "--mount",
+            f"type=bind,src={self.workspace},dst=/workspace,readonly",
             "--network",
             "none" if not policy.allow_network else "bridge",
             "--read-only",
@@ -85,6 +111,7 @@ class DockerLabExecutor:
             self.image,
             *ability.command,
         ]
+        started = time.monotonic()
         try:
             completed = subprocess.run(
                 command,
@@ -94,7 +121,9 @@ class DockerLabExecutor:
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return ExecutionResult(ability.id, "failed", "", str(exc), -1, "docker")
+            return ExecutionResult(
+                ability.id, "failed", "", str(exc), -1, "docker", time.monotonic() - started
+            )
         return ExecutionResult(
             ability.id,
             "succeeded" if completed.returncode == 0 else "failed",
@@ -102,6 +131,7 @@ class DockerLabExecutor:
             completed.stderr[-16_384:],
             completed.returncode,
             "docker",
+            round(time.monotonic() - started, 3),
         )
 
 
