@@ -152,6 +152,10 @@ catalog의 `volatile_patterns`로 **능력별로 선언**해 해결합니다.
 
 - catalog에 없는 능력 ID와 임의 shell 문자열은 거부합니다.
 - 기본 정책은 low-risk 능력, 최대 8단계, 단계별 timeout, 네트워크 비활성입니다.
+- timeout은 클라이언트가 아니라 컨테이너에 강제됩니다. 초과 시 컨테이너를 이름으로
+  강제 제거하며(`docker rm --force`), 결과는 `timed-out` 상태로 기록됩니다.
+- 에이전트마다 랩 기본값보다 좁은 정책을 적용할 수 있습니다(`Coordinator(agent_policies=...)`).
+  허용되지 않는 능력은 애초에 배정되지 않고 `ability.withheld` 이벤트로 남습니다.
 - `requires_network` 능력은 정책이 네트워크를 허용하지 않는 한 실행되지 않습니다.
 - `LabPolicy(approved_abilities=...)`로 catalog보다 좁은 승인 집합을 강제할 수 있습니다.
 - 컨테이너는 read-only rootfs와 capability 제거로 실행됩니다.
@@ -184,7 +188,7 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 84 passed
+pytest             -> 92 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
@@ -194,6 +198,7 @@ Beacon             -> 127.0.0.1 전용 바인드, 4/4 실행 (컨테이너는 --
 Multi-agent        -> 3 에이전트 동시 실행, 중복 배정 0건
 Coordinator        -> beacon 실행에서 plan/RL/reward 이벤트 생성, Q table 학습 확인
 ATT&CK coverage    -> 8 techniques (T1016/T1033/T1057/T1082/T1083/T1087.001/T1518/T1613)
+Timeout            -> timed-out 상태, 컨테이너 누수 0건 (수정 전: 컨테이너 계속 실행)
 GitHub Actions     -> success (quality 3.10/3.12 + docker-smoke)
 ```
 

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import http.client
 import json
+import subprocess
 import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -13,9 +15,15 @@ from caldera_lab import cli
 from caldera_lab import planner as planner_module
 from caldera_lab.agent import BeaconAgent
 from caldera_lab.beacon import BeaconRefused, BeaconServer, BeaconState
-from caldera_lab.catalog import AbilityCatalog
+from caldera_lab.catalog import Ability, AbilityCatalog
 from caldera_lab.coordinator import Coordinator
-from caldera_lab.executor import DryRunExecutor, ExecutionResult, LocalLabExecutor
+from caldera_lab.executor import (
+    SUCCESS_STATUSES,
+    DockerLabExecutor,
+    DryRunExecutor,
+    ExecutionResult,
+    LocalLabExecutor,
+)
 from caldera_lab.orchestrator import Orchestrator
 from caldera_lab.planner import LLMPlanner, RulePlanner
 from caldera_lab.policy import LabPolicy
@@ -998,10 +1006,56 @@ def test_coordinator_budget_is_shared_across_agents(catalog: AbilityCatalog) -> 
 def test_coordinator_applies_the_policy_to_beacon_agents(catalog: AbilityCatalog) -> None:
     policy = LabPolicy(approved_abilities=frozenset({"collect-host-identity"}))
     coordinator = Coordinator(catalog, policy=policy, planner_mode="rules", max_steps=4)
-    # The planner may propose anything; the policy still decides.
-    with pytest.raises(PermissionError):
-        for _ in range(4):
-            coordinator.next_ability("agent-1")
+    # The planner may propose anything; the policy still decides what is handed out.
+    handed = [coordinator.next_ability("agent-1") for _ in range(4)]
+    assert handed == ["collect-host-identity", None, None, None]
+    withheld = [event for event in coordinator.events if event.event == "ability.withheld"]
+    assert withheld and withheld[0].details["agent_id"] == "agent-1"
+
+
+def test_agents_can_be_held_to_different_policies(catalog: AbilityCatalog) -> None:
+    restricted = LabPolicy(approved_abilities=frozenset({"collect-host-identity"}))
+    coordinator = Coordinator(
+        catalog,
+        planner_mode="rules",
+        max_steps=6,
+        agent_policies={"restricted": restricted},
+    )
+    # The restricted agent may only ever be offered its one ability.
+    assert coordinator.next_ability("restricted") == "collect-host-identity"
+    assert coordinator.next_ability("restricted") is None
+    # The unrestricted agent still gets the rest of the catalog.
+    trusted = [coordinator.next_ability("trusted") for _ in range(3)]
+    assert all(ability is not None for ability in trusted)
+    assert "collect-host-identity" not in trusted
+
+
+def test_a_restricted_agent_does_not_stall_the_run(catalog: AbilityCatalog) -> None:
+    # Withholding must not consume the budget or raise; other agents carry on.
+    coordinator = Coordinator(
+        catalog,
+        planner_mode="rules",
+        max_steps=3,
+        agent_policies={"blocked": LabPolicy(approved_abilities=frozenset())},
+    )
+    assert coordinator.next_ability("blocked") is None
+    handed = [coordinator.next_ability("open") for _ in range(3)]
+    assert all(ability is not None for ability in handed)
+    approved = [e for e in coordinator.events if e.event == "ability.approved"]
+    assert len(approved) == 3
+    assert {e.details["policy"] for e in approved} == {"lab"}
+
+
+def test_agent_policy_is_recorded_in_the_audit_event(catalog: AbilityCatalog) -> None:
+    coordinator = Coordinator(
+        catalog,
+        planner_mode="rules",
+        max_steps=2,
+        agent_policies={"scoped": LabPolicy()},
+    )
+    coordinator.next_ability("scoped")
+    approved = next(e for e in coordinator.events if e.event == "ability.approved")
+    assert approved.details["policy"] == "agent"
 
 
 def test_orchestrator_and_beacon_share_one_coordinator_contract(
@@ -1066,3 +1120,93 @@ def test_network_interface_patterns_mask_counters(catalog: AbilityCatalog) -> No
     assert facts == RewardModel.facts(later, ability.volatile_patterns)
     # The interface name survives; only the counters are masked.
     assert "lo:" in facts[0]
+
+
+def _slow_ability(seconds: int = 30) -> Ability:
+    return Ability(
+        id="collect-host-identity",
+        name="Slow stand-in",
+        tactic="discovery",
+        technique="T0000",
+        command=("sleep", str(seconds)),
+        description="Only used to drive the timeout path.",
+    )
+
+
+def test_local_executor_reports_a_timeout_distinctly(tmp_path: Path) -> None:
+    result = LocalLabExecutor(tmp_path).execute(_slow_ability(), LabPolicy(timeout_seconds=1))
+    assert result.status == "timed-out"
+    assert result.return_code == -1
+    assert "lab timeout" in result.stderr
+    assert result.duration_seconds >= 1.0
+
+
+def test_a_timeout_is_never_counted_as_success() -> None:
+    assert "timed-out" not in SUCCESS_STATUSES
+    breakdown = RewardModel().score(_result("partial\n", status="timed-out"), LabPolicy())
+    assert breakdown.outcome == -1.0
+    assert breakdown.information_gain == 0.0
+
+
+def test_report_counts_a_timeout_as_a_failure(catalog: AbilityCatalog, tmp_path: Path) -> None:
+    log = tmp_path / "events.jsonl"
+    log.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "run_id": "r1",
+                "event": "ability.completed",
+                "details": {
+                    "ability_id": "collect-host-identity",
+                    "status": "timed-out",
+                    "isolation": "docker",
+                    "duration_seconds": 20.0,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    summary = next(iter(summarize(load_events(log)).values()))
+    assert sum(summary.failed.values()) == 1
+    assert sum(summary.succeeded.values()) == 0
+
+
+def test_docker_executor_names_its_container_for_cleanup() -> None:
+    # Without --name a timed-out container cannot be found and removed, because
+    # --rm only runs if the client survives.
+    recorded: list[list[str]] = []
+
+    class _Timeout:
+        def __call__(self, command, **kwargs):
+            recorded.append(command)
+            if command[:3] == ["docker", "rm", "--force"]:
+                return subprocess.CompletedProcess(command, 0, "", "")
+            raise subprocess.TimeoutExpired(command, 1)
+
+    executor = DockerLabExecutor(startup_grace_seconds=0.1)
+    with mock.patch.object(subprocess, "run", _Timeout()):
+        result = executor.execute(_slow_ability(), LabPolicy(timeout_seconds=1))
+
+    assert result.status == "timed-out"
+    run_command = recorded[0]
+    name = run_command[run_command.index("--name") + 1]
+    assert name.startswith("caldera-lab-")
+    # The abandoned container is force-removed, not left running.
+    assert recorded[1] == ["docker", "rm", "--force", name]
+
+
+def test_docker_executor_cleans_up_after_a_spawn_failure() -> None:
+    recorded: list[list[str]] = []
+
+    def _oserror(command, **kwargs):
+        recorded.append(command)
+        if command[:3] == ["docker", "rm", "--force"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        raise OSError("docker is not installed")
+
+    with mock.patch.object(subprocess, "run", _oserror):
+        result = DockerLabExecutor().execute(_slow_ability(), LabPolicy())
+
+    assert result.status == "failed"
+    assert recorded[1][:3] == ["docker", "rm", "--force"]

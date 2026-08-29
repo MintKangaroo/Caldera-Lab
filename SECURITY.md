@@ -25,7 +25,13 @@ that weakens one as a security change, not a refactor.
   it, and `LLMPlanner._request` re-validates locally because the endpoint is
   operator-configurable. Rejected IDs are recorded, not discarded silently.
 - `LabPolicy` gates risk level, network use, step count, and an optional
-  approved set narrower than the catalog.
+  approved set narrower than the catalog. Individual agents may be held to a
+  narrower policy still; abilities their policy forbids are never offered to
+  them, and the refusal is audited as `ability.withheld`.
+- A step timeout is enforced against the container, not just the client. On
+  expiry the container is removed by name, because `--rm` only runs if the
+  client survives to perform it. The result is recorded as `timed-out`, which
+  counts as a failure everywhere it is read.
 - Containers run with `--network none`, `--read-only`, `--user 65534:65534`,
   `--cap-drop ALL`, `--security-opt no-new-privileges`, `--pull never`, and
   PID, memory, and CPU limits. `/workspace` is bind-mounted read-only.

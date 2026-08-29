@@ -26,6 +26,14 @@ class Event:
     details: dict[str, object]
 
 
+def _permitted(policy: LabPolicy, catalog: AbilityCatalog, ability_id: str, index: int) -> bool:
+    try:
+        policy.validate(catalog, ability_id, index)
+    except PermissionError:
+        return False
+    return True
+
+
 class Coordinator:
     """Decides what runs next and learns from what came back.
 
@@ -43,9 +51,13 @@ class Coordinator:
         q_table_path: Path | None = None,
         reward_model: RewardModel | None = None,
         max_steps: int | None = None,
+        agent_policies: dict[str, LabPolicy] | None = None,
     ) -> None:
         self.catalog = catalog
         self.policy = policy or LabPolicy()
+        # An agent may be held to a narrower policy than the lab default, so a
+        # less trusted agent cannot be handed everything the catalog allows.
+        self.agent_policies: dict[str, LabPolicy] = dict(agent_policies or {})
         self.planner = (
             LLMPlanner(catalog) if planner_mode in {"llm", "hybrid"} else RulePlanner(catalog)
         )
@@ -63,6 +75,13 @@ class Coordinator:
         self._issued = 0
         self._pending: dict[str, tuple[str, str]] = {}
         self._started = False
+
+    def policy_for(self, agent_id: str) -> LabPolicy:
+        return self.agent_policies.get(agent_id, self.policy)
+
+    def set_agent_policy(self, agent_id: str, policy: LabPolicy) -> None:
+        with self._lock:
+            self.agent_policies[agent_id] = policy
 
     def _emit(self, name: str, details: dict[str, object]) -> None:
         self.events.append(Event(now(), self.run_id, name, details))
@@ -123,8 +142,25 @@ class Coordinator:
                 return None
             index = self._issued
             state = self.rl.state(self._observations)
-            ability_id = self.rl.choose(state, candidates)
-            self.policy.validate(self.catalog, ability_id, index)
+            policy = self.policy_for(agent_id)
+            # Only offer this agent what its own policy permits, then validate;
+            # otherwise one restricted agent would stall the whole run.
+            permitted = tuple(
+                item for item in candidates if _permitted(policy, self.catalog, item, index)
+            )
+            if not permitted:
+                self._emit(
+                    "ability.withheld",
+                    {
+                        "index": index,
+                        "agent_id": agent_id,
+                        "candidates": list(candidates),
+                        "reason": "no candidate satisfies this agent's policy",
+                    },
+                )
+                return None
+            ability_id = self.rl.choose(state, permitted)
+            policy.validate(self.catalog, ability_id, index)
             self._used.add(ability_id)
             self._issued += 1
             self._pending[f"{agent_id}:{ability_id}"] = (state, ability_id)
@@ -136,6 +172,7 @@ class Coordinator:
                     "agent_id": agent_id,
                     "ability_id": ability.id,
                     "technique": ability.technique,
+                    "policy": "agent" if agent_id in self.agent_policies else "lab",
                 },
             )
             return ability_id
@@ -153,7 +190,7 @@ class Coordinator:
                 *self._observations,
                 f"{ability_id}:{result.status}:{result.return_code}",
             )
-            breakdown = self.reward_model.score(result, self.policy, ability)
+            breakdown = self.reward_model.score(result, self.policy_for(agent_id), ability)
             self._emit(
                 "reward.scored",
                 {"agent_id": agent_id, "ability_id": ability_id, **breakdown.as_details()},
