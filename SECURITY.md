@@ -28,8 +28,11 @@ that weakens one as a security change, not a refactor.
   approved set narrower than the catalog. Individual agents may be held to a
   narrower policy still (`serve --agent-policy`); abilities their policy
   forbids are never offered to them, and the refusal is audited as
-  `ability.withheld`. The guarantee is about what an agent may run, not that it
-  is given work: under a shared budget a restricted agent can be starved.
+  `ability.withheld`. The guarantee is about what an agent may run, not that
+  it is given work, but an agent with alternatives yields abilities another
+  declared agent has no alternative to, so a declared policy is not defeated
+  by scheduling luck. The reservation is a preference, not a lock: a reserved
+  ability is still issued if nothing else remains.
 - An agent retries transport failures but never retries a rejected token, and
   re-registers at most once when the server no longer knows it.
 - A step timeout is enforced against the container, not just the client. On

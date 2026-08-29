@@ -77,6 +77,25 @@ class Coordinator:
         self._pending: dict[str, tuple[str, str]] = {}
         self._started = False
 
+    def _scarce_for_others(self, agent_id: str, candidates: tuple[str, ...]) -> set[str]:
+        """Abilities another declared agent has almost no alternative to.
+
+        A restricted agent is starved whenever an unrestricted one happens to
+        take the single ability its policy allows. Nothing forbids that - the
+        budget is shared - but it makes a declared policy pointless in
+        practice, so an agent with alternatives yields those scarce ones.
+        """
+        scarce: set[str] = set()
+        for other, policy in self.agent_policies.items():
+            if other == agent_id:
+                continue
+            options = [
+                item for item in candidates if _permitted(policy, self.catalog, item, 0)
+            ]
+            if len(options) <= 1:
+                scarce.update(options)
+        return scarce
+
     def policy_for(self, agent_id: str) -> LabPolicy:
         return self.agent_policies.get(agent_id, self.policy)
 
@@ -151,6 +170,19 @@ class Coordinator:
             permitted = tuple(
                 item for item in candidates if _permitted(policy, self.catalog, item, index)
             )
+            deferred = self._scarce_for_others(agent_id, permitted)
+            preferred = tuple(item for item in permitted if item not in deferred)
+            if preferred and deferred:
+                self._emit(
+                    "ability.deferred",
+                    {
+                        "index": index,
+                        "agent_id": agent_id,
+                        "abilities": sorted(deferred),
+                        "reason": "reserved for an agent with no alternative",
+                    },
+                )
+                permitted = preferred
             if not permitted:
                 self._emit(
                     "ability.withheld",

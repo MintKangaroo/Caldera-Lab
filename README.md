@@ -121,12 +121,19 @@ allowlist가 거부한 ID 목록도 함께 보여줍니다.
 베이스 이미지는 digest로 고정되어 있습니다. 갱신 시 CI의 `docker-smoke` 잡을 다시 통과시켜야
 합니다. 안전 경계와 능력 추가 절차는 [`SECURITY.md`](SECURITY.md)를 따르세요.
 
-### 제한된 에이전트와 굶주림
+### 제한된 에이전트를 위한 예약
 
-에이전트별 정책은 "무엇을 실행할 수 있는가"를 보장할 뿐, "작업을 받는다"를 보장하지 않습니다.
 예산과 `used` 집합이 공유되므로, 제한 없는 에이전트가 제한된 에이전트의 유일한 허용 능력을
-먼저 가져가면 그 에이전트는 아무것도 받지 못하고 `ability.withheld`로 기록됩니다. 공유 예산에서
-이는 실패가 아니라 올바른 결과이며, 테스트로 고정해 두었습니다.
+먼저 가져가면 그 에이전트는 굶습니다. 규칙 위반은 아니지만 선언한 정책이 무의미해지므로,
+**대안이 있는 에이전트는 다른 에이전트에게 희소한 능력을 양보합니다.** 양보는 `ability.deferred`
+이벤트로 남습니다.
+
+```text
+제한 에이전트가 굶는 비율 (200회 시행)   예약 전 98%  ->  예약 후 0%
+```
+
+예약은 하드 블록이 아니라 선호입니다. 제한된 에이전트가 끝내 나타나지 않으면 예약된 능력도
+결국 배정되므로(마지막 순서로) 랩이 교착되지 않습니다.
 
 ### 재접속과 재시도
 
@@ -212,7 +219,7 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 104 passed
+pytest             -> 106 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
@@ -224,6 +231,7 @@ Coordinator        -> beacon 실행에서 plan/RL/reward 이벤트 생성, Q tab
 ATT&CK coverage    -> 8 techniques (T1016/T1033/T1057/T1082/T1083/T1087.001/T1518/T1613)
 Timeout            -> timed-out 상태, 컨테이너 누수 0건 (수정 전: 컨테이너 계속 실행)
 RL credit          -> 4 에이전트 동시 실행 시 고유 state 2 -> 8 (순차와 동일)
+Agent starvation   -> 98% -> 0% (200회 시행), 교착 없음
 GitHub Actions     -> success (quality 3.10/3.12 + docker-smoke)
 ```
 

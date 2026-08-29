@@ -1294,21 +1294,50 @@ def test_serve_cli_restricts_a_named_agent(tmp_path: Path, capsys) -> None:
         assert any(r["details"]["agent_id"] == "agent-2" for r in withheld)
 
 
-def test_a_restricted_agent_is_starved_rather_than_served_the_wrong_ability(
-    catalog: AbilityCatalog,
-) -> None:
-    """Documented consequence of a shared budget, pinned so it stays deliberate."""
+def test_an_agent_with_alternatives_yields_a_scarce_ability(catalog: AbilityCatalog) -> None:
+    """An open agent must not casually consume another agent's only option."""
+    only = catalog.ids()[0]
     coordinator = Coordinator(
         catalog,
         planner_mode="rules",
         max_steps=4,
-        agent_policies={"narrow": LabPolicy(approved_abilities=frozenset({catalog.ids()[0]}))},
+        agent_policies={"narrow": LabPolicy(approved_abilities=frozenset({only}))},
     )
-    # An open agent takes the only ability the narrow agent could have run.
-    assert coordinator.next_ability("open") == catalog.ids()[0]
-    assert coordinator.next_ability("narrow") is None
-    withheld = [event for event in coordinator.events if event.event == "ability.withheld"]
-    assert withheld[-1].details["agent_id"] == "narrow"
+    assert coordinator.next_ability("open") != only
+    assert coordinator.next_ability("narrow") == only
+    deferred = [event for event in coordinator.events if event.event == "ability.deferred"]
+    assert deferred[0].details["abilities"] == [only]
+
+
+def test_reservation_is_a_preference_not_a_deadlock(catalog: AbilityCatalog) -> None:
+    # If the restricted agent never beacons, the reserved ability must still be
+    # handed out rather than stalling the run at the end.
+    only = catalog.ids()[0]
+    coordinator = Coordinator(
+        catalog,
+        planner_mode="rules",
+        max_steps=len(catalog.ids()),
+        agent_policies={"absent": LabPolicy(approved_abilities=frozenset({only}))},
+    )
+    handed = [coordinator.next_ability("open") for _ in range(len(catalog.ids()))]
+    assert None not in handed
+    assert handed[-1] == only  # taken last, but taken
+
+
+def test_reservation_only_defers_for_agents_that_lack_alternatives(
+    catalog: AbilityCatalog,
+) -> None:
+    # An agent with several permitted abilities is not scarce, so nothing is
+    # reserved on its behalf.
+    roomy = frozenset(catalog.ids()[:4])
+    coordinator = Coordinator(
+        catalog,
+        planner_mode="rules",
+        max_steps=2,
+        agent_policies={"roomy": LabPolicy(approved_abilities=roomy)},
+    )
+    coordinator.next_ability("open")
+    assert not [event for event in coordinator.events if event.event == "ability.deferred"]
 
 
 def test_serve_cli_rejects_an_unknown_ability_in_a_policy() -> None:
