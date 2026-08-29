@@ -112,6 +112,12 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
   허용하고, 재시도(기본 2회)·요청 timeout·지연·토큰 사용량을 기록합니다. 기존 `except: pass`로
   삼켜지던 실패는 이제 `Plan.diagnostics`를 거쳐 `plan.created`/`plan.replanned` 이벤트에
   사유와 함께 남습니다. 거부된 ID 문자열도 함께 기록합니다.
+- CI에 `docker-smoke` 잡을 추가했습니다. 이미지 빌드 -> 4개 능력 실제 실행 ->
+  `.github/scripts/check_smoke.py`로 감사 로그 검증 -> `/workspace` 쓰기 거부 확인 ->
+  감사 로그 artifact 업로드. 체커는 종료 코드뿐 아니라 마운트된 파일이 실제로 나열되었는지와
+  모든 실행의 `isolation`이 `docker`인지 확인합니다(회귀 3종 시뮬레이션으로 검증함).
+- Dockerfile 베이스 이미지를 digest로 고정했습니다.
+- `SECURITY.md`와 `.dockerignore`를 추가했습니다.
 - 테스트 6개 -> 40개.
 
 ## 6. 다음 세션 우선순위
@@ -126,7 +132,10 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
    timeout test, Docker 실행 검증을 함께 추가합니다.
 5. **대시보드 연동**: 현재 대시보드는 `make test`만 제공합니다. Caldera 전용 `run` action과
    `.runtime/run.jsonl` 로그 표시를 추가할지 검토합니다.
-6. **CI Docker smoke test**: GitHub Actions에서 이미지 빌드와 최소 1개 능력 실행을 추가합니다.
+6. ~~**CI Docker smoke test**~~: 완료(5-1 참고). GitHub Actions에서 실제로 통과하는지는
+   푸시 후 확인이 필요합니다. 로컬에서 동일 절차를 재현해 검증했습니다.
+
+7. **LICENSE 미정**: 아직 없습니다. 공개 저장소이므로 선택이 필요합니다.
 
 ## 7. 시작 전 확인 명령
 

@@ -26,3 +26,42 @@ jobs:
         run: python -m ruff check .
       - name: Test
         run: python -m pytest
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: python -m pip install -e "."
+      - name: Build the lab agent image
+        run: docker build -t caldera-lab-agent:latest .
+      - name: Run every ability in the isolated executor
+        run: |
+          mkdir -p smoke-workspace
+          echo "ci-sample" > smoke-workspace/sample.txt
+          python -m caldera_lab run \
+            --executor docker --planner rules --steps 4 \
+            --workspace "$PWD/smoke-workspace" \
+            --no-q-table --log smoke.jsonl
+      - name: Assert every ability succeeded in the container
+        run: python .github/scripts/check_smoke.py smoke.jsonl
+      - name: Assert the workspace stayed read-only
+        run: |
+          if docker run --rm --pull never --network none --read-only \
+              --user 65534:65534 --cap-drop ALL \
+              --security-opt no-new-privileges:true --pids-limit 64 \
+              --mount type=bind,src="$PWD/smoke-workspace",dst=/workspace,readonly \
+              caldera-lab-agent:latest touch /workspace/pwned; then
+            echo "::error::the agent was able to write to /workspace"
+            exit 1
+          fi
+      - name: Upload the audit log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-audit-log
+          path: smoke.jsonl

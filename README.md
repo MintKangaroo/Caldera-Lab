@@ -74,6 +74,9 @@ PYTHONPATH=src python3 -m caldera_lab run --executor local --allow-local --steps
 
 `local` 실행기는 개발 전용이며 기본값이 아닙니다. 실제 랩 실행은 Docker executor를 사용하세요.
 
+베이스 이미지는 digest로 고정되어 있습니다. 갱신 시 CI의 `docker-smoke` 잡을 다시 통과시켜야
+합니다. 안전 경계와 능력 추가 절차는 [`SECURITY.md`](SECURITY.md)를 따르세요.
+
 ### 보상 설계의 알려진 한계
 
 정보 이득은 stdout 라인을 정규화해 중복을 판별합니다. 따라서 실행마다 값이 바뀌는 출력
@@ -96,11 +99,17 @@ PYTHONPATH=src python3 -m caldera_lab run --executor local --allow-local --steps
 make check
 ```
 
+CI는 두 개의 잡으로 구성됩니다. `quality`는 Python 3.10/3.12에서 lint와 테스트를 돌리고,
+`docker-smoke`는 이미지를 빌드해 4개 능력을 실제 컨테이너에서 실행한 뒤
+`.github/scripts/check_smoke.py`로 감사 로그를 검증합니다. 이 검사는 종료 코드만 보지 않고,
+`/workspace`가 실제로 마운트되어 파일이 나열되었는지와 모든 실행의 `isolation`이 `docker`인지를
+확인합니다. 별도로 `/workspace` 쓰기가 거부되는지도 검사합니다.
+
 현재 테스트는 catalog 검증, planner fallback, LLM이 catalog 밖 ID를 반환할 때의 거부,
 CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 감사 로그 append와 `run_id`
 분리, RL state 추상화·Q table 왕복·손상된 table 거부·시드 재현성, 보상의 정보 이득·중복
 감점·시간 비용 상한, LLM planner의 schema 제약·재시도·fallback 사유 기록, local executor를
-검증합니다. GitHub Actions는 Python 3.10/3.12에서 lint와 테스트를 실행합니다.
+검증합니다. 
 
 최근 검증 결과:
 
@@ -111,12 +120,15 @@ Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
 Reward             -> 최초 실행 1.24, 동일 능력 반복 시 0.21 (정보 이득 1.0 -> 0.0)
+Docker smoke       -> 4 executions, 0 failures (digest 고정 이미지 기준)
 ```
 
 ## 구조
 
 ```text
 Caldera_Lab/
+├── SECURITY.md                  # 안전 경계와 능력 추가 절차
+├── .github/scripts/check_smoke.py  # CI 감사 로그 검증
 ├── catalog/abilities.json       # 허용된 능력 선언
 ├── src/caldera_lab/catalog.py   # catalog parser
 ├── src/caldera_lab/planner.py   # rule/LLM planner
