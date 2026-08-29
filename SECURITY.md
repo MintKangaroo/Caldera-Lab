@@ -29,6 +29,15 @@ that weakens one as a security change, not a refactor.
 - Containers run with `--network none`, `--read-only`, `--user 65534:65534`,
   `--cap-drop ALL`, `--security-opt no-new-privileges`, `--pull never`, and
   PID, memory, and CPU limits. `/workspace` is bind-mounted read-only.
+- The beacon server binds 127.0.0.1 and refuses any other address, including
+  0.0.0.0. It mints a per-run token that is never written to disk, and rejects
+  unauthenticated requests, unknown endpoints, unregistered agents, oversized
+  bodies, and results naming an ability outside the catalog.
+- The beacon protocol carries ability IDs, never commands. An agent resolves an
+  ID against its own catalog and re-validates it against the policy, so a
+  compromised server cannot introduce a command into the lab.
+- Agents beacon from the lab side, not from inside the sandbox, so containers
+  keep `--network none`.
 - The `local` executor bypasses container isolation and is development-only.
   The CLI refuses it without `--allow-local`.
 - Plans, approvals, executions, and rewards are appended to a JSONL audit log

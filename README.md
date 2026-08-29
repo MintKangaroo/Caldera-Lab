@@ -28,6 +28,7 @@ policy, Docker 경계, 감사 로그, 테스트를 함께 갱신해야 합니다
 - 실제 agent execution: 기본 실행기는 Docker 컨테이너이며 `network none`, read-only rootfs,
   `cap-drop ALL`, `no-new-privileges`, PID·메모리·CPU 제한, `--pull never`를 적용합니다.
 - 감사 가능성: 계획, 승인, 실행 결과를 `run_id`가 붙은 JSONL 이벤트 로그에 append합니다.
+- 에이전트 통신: loopback 전용 beacon 프로토콜. 명령이 아닌 ability ID만 전달합니다.
 - 기본 능력은 `id`, `uname`, `ps`, read-only로 마운트한 `/workspace` 목록 수집뿐입니다.
 
 ```mermaid
@@ -73,6 +74,20 @@ make run                         # dry-run
 PYTHONPATH=src python3 -m caldera_lab run --executor local --allow-local --steps 2
 ```
 
+에이전트 통신 계층을 통해 실행하려면:
+
+```bash
+PYTHONPATH=src python3 -m caldera_lab serve --executor docker --steps 4
+```
+
+beacon 서버는 `127.0.0.1`에만 바인드하며(다른 주소는 거부), 실행마다 새 토큰을 발급하고
+저장하지 않습니다. **서버는 명령 문자열을 보내지 않고 catalog의 ability ID만 보냅니다.**
+에이전트는 그 ID를 자신의 로컬 catalog에서 해석하고 정책 검증을 다시 통과시킨 뒤 실행합니다.
+따라서 서버가 장악되어도 랩에 새로운 명령을 주입할 수 없습니다 — LLM planner와 동일한 경계입니다.
+
+beacon을 쓰는 주체는 컨테이너가 아니라 **랩 측 supervisor 프로세스**입니다. 컨테이너 안에서는
+소켓이 전혀 필요 없으므로 `--network none`이 그대로 유지됩니다.
+
 실행 결과를 요약하려면:
 
 ```bash
@@ -116,6 +131,7 @@ catalog의 `volatile_patterns`로 **능력별로 선언**해 해결합니다.
 - `requires_network` 능력은 정책이 네트워크를 허용하지 않는 한 실행되지 않습니다.
 - `LabPolicy(approved_abilities=...)`로 catalog보다 좁은 승인 집합을 강제할 수 있습니다.
 - 컨테이너는 read-only rootfs와 capability 제거로 실행됩니다.
+- beacon 서버는 loopback에만 바인드하고, 토큰 없는 요청과 catalog 밖 ability를 거부합니다.
 - 이 저장소는 인터넷 스캔, 자격 증명 수집, 지속성 설치, 임의 파일 변경 능력을 제공하지 않습니다.
 - 반드시 소유하거나 명시적으로 허가된 격리 랩에서만 사용하세요.
 
@@ -141,12 +157,13 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 54 passed
+pytest             -> 69 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
 Reward             -> 최초 실행 1.24, 동일 능력 반복 시 0.24 (4개 능력 모두 정보 이득 0.0)
 Docker smoke       -> 4 executions, 0 failures (digest 고정 이미지 기준)
+Beacon             -> 127.0.0.1 전용 바인드, 4/4 실행 (컨테이너는 --network none 유지)
 GitHub Actions     -> success (quality 3.10/3.12 + docker-smoke)
 ```
 
@@ -162,6 +179,8 @@ Caldera_Lab/
 ├── src/caldera_lab/rl.py        # tabular Q policy + JSON 영속화
 ├── src/caldera_lab/reward.py    # 정보 이득 기반 보상
 ├── src/caldera_lab/report.py    # 감사 로그 집계 + ATT&CK 커버리지
+├── src/caldera_lab/beacon.py    # loopback 전용 beacon 서버
+├── src/caldera_lab/agent.py     # beacon 에이전트 (랩 측 supervisor)
 ├── src/caldera_lab/policy.py    # risk/network/승인 게이트
 ├── src/caldera_lab/executor.py  # Docker/local/dry-run executor
 └── src/caldera_lab/orchestrator.py
