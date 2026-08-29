@@ -19,9 +19,9 @@ policy, Docker 경계, 감사 로그, 테스트를 함께 갱신해야 합니다
 - LLM planner: 관찰 로그를 보고 다음 단계를 제안하지만, 결과는 로컬 allowlist로 재검증합니다.
 - RL policy: tabular Q-policy가 허용된 능력 중 다음 능력을 선택하고 보상으로 업데이트합니다.
 - 실제 agent execution: 기본 실행기는 Docker 컨테이너이며 `network none`, read-only rootfs,
-  `cap-drop ALL`, `no-new-privileges`, PID 제한을 적용합니다.
-- 감사 가능성: 계획, 승인, 실행 결과를 JSONL 이벤트 로그로 남깁니다.
-- 기본 능력은 `id`, `uname`, `ps`, 명시적으로 마운트한 `/workspace` 목록 수집뿐입니다.
+  `cap-drop ALL`, `no-new-privileges`, PID·메모리·CPU 제한, `--pull never`를 적용합니다.
+- 감사 가능성: 계획, 승인, 실행 결과를 `run_id`가 붙은 JSONL 이벤트 로그에 append합니다.
+- 기본 능력은 `id`, `uname`, `ps`, read-only로 마운트한 `/workspace` 목록 수집뿐입니다.
 
 ```mermaid
 flowchart LR
@@ -44,6 +44,9 @@ docker build -t caldera-lab-agent:latest .
 PYTHONPATH=src python3 -m caldera_lab run --executor docker --planner hybrid --steps 4
 ```
 
+`--workspace <dir>`로 에이전트에 노출할 디렉터리를 지정합니다. 지정하지 않으면
+`.runtime/workspace`를 사용하며, 어느 경우든 컨테이너 안에서는 read-only입니다.
+
 API 키가 없으면 `hybrid` planner는 결정론적 규칙 planner로 안전하게 fallback합니다.
 LLM 사용 시 `OPENAI_API_KEY`, 선택적으로 `CALDERA_LLM_MODEL`과
 `CALDERA_LLM_ENDPOINT`를 설정합니다. LLM은 명령을 만들 수 없고 catalog의 ID만 반환합니다.
@@ -61,6 +64,8 @@ PYTHONPATH=src python3 -m caldera_lab run --executor local --allow-local --steps
 
 - catalog에 없는 능력 ID와 임의 shell 문자열은 거부합니다.
 - 기본 정책은 low-risk 능력, 최대 8단계, 단계별 timeout, 네트워크 비활성입니다.
+- `requires_network` 능력은 정책이 네트워크를 허용하지 않는 한 실행되지 않습니다.
+- `LabPolicy(approved_abilities=...)`로 catalog보다 좁은 승인 집합을 강제할 수 있습니다.
 - 컨테이너는 read-only rootfs와 capability 제거로 실행됩니다.
 - 이 저장소는 인터넷 스캔, 자격 증명 수집, 지속성 설치, 임의 파일 변경 능력을 제공하지 않습니다.
 - 반드시 소유하거나 명시적으로 허가된 격리 랩에서만 사용하세요.
@@ -71,16 +76,17 @@ PYTHONPATH=src python3 -m caldera_lab run --executor local --allow-local --steps
 make check
 ```
 
-현재 테스트는 catalog 검증, planner fallback, RL 실행 루프, JSONL 감사 로그,
-local executor를 검증합니다. GitHub Actions는 Python 3.10/3.12에서 lint와 테스트를 실행합니다.
+현재 테스트는 catalog 검증, planner fallback, LLM이 catalog 밖 ID를 반환할 때의 거부,
+CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 감사 로그 append와 `run_id`
+분리, RL 실행 루프, local executor를 검증합니다. GitHub Actions는 Python 3.10/3.12에서 lint와 테스트를 실행합니다.
 
 최근 검증 결과:
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 6 passed
-Docker execution   -> 2 abilities succeeded as uid=65534(nobody)
-GitHub Actions      -> success (Python 3.10 / 3.12)
+pytest             -> 15 passed
+Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
+Workspace mount    -> read-only enforced (touch -> Read-only file system)
 ```
 
 ## 구조
@@ -91,6 +97,7 @@ Caldera_Lab/
 ├── src/caldera_lab/catalog.py   # catalog parser
 ├── src/caldera_lab/planner.py   # rule/LLM planner
 ├── src/caldera_lab/rl.py        # tabular Q policy
+├── src/caldera_lab/policy.py    # risk/network/승인 게이트
 ├── src/caldera_lab/executor.py  # Docker/local/dry-run executor
 └── src/caldera_lab/orchestrator.py
 ```

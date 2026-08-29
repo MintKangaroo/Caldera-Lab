@@ -14,6 +14,7 @@ class Ability:
     command: tuple[str, ...]
     description: str
     risk: str = "low"
+    requires_network: bool = False
 
 
 class AbilityCatalog:
@@ -48,6 +49,7 @@ class AbilityCatalog:
                     command=tuple(command),
                     description=item["description"],
                     risk=item.get("risk", "low"),
+                    requires_network=bool(item.get("requires_network", False)),
                 )
             )
         return cls(tuple(abilities))

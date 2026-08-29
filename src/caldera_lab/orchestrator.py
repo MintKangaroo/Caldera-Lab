@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ def now() -> str:
 @dataclass(frozen=True)
 class Event:
     timestamp: str
+    run_id: str
     event: str
     details: dict[str, object]
 
@@ -39,6 +41,7 @@ class Orchestrator:
             LLMPlanner(catalog) if planner_mode in {"llm", "hybrid"} else RulePlanner(catalog)
         )
         self.rl = QPolicy(catalog, seed=seed)
+        self.run_id = uuid.uuid4().hex[:12]
 
     def run(self, steps: int, log_path: Path | None = None) -> list[Event]:
         limit = min(steps, self.policy.max_steps)
@@ -49,6 +52,7 @@ class Orchestrator:
         events.append(
             Event(
                 now(),
+                self.run_id,
                 "plan.created",
                 {
                     "source": plan.source,
@@ -78,6 +82,7 @@ class Orchestrator:
             events.append(
                 Event(
                     now(),
+                    self.run_id,
                     "ability.approved",
                     {
                         "index": index,
@@ -87,15 +92,14 @@ class Orchestrator:
                 )
             )
             result = self.executor.execute(ability, self.policy)
-            events.append(Event(now(), "ability.completed", asdict(result)))
+            events.append(Event(now(), self.run_id, "ability.completed", asdict(result)))
             observations = (*observations, f"{ability.id}:{result.status}:{result.return_code}")
             reward = 1.0 if result.status in {"succeeded", "planned"} else -1.0
             self.rl.update(state, ability_id, reward, self.rl.state(observations))
             plan = self.planner.plan(observations, limit - index - 1)
         if log_path:
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            serialized = "\n".join(
-                json.dumps(asdict(item), ensure_ascii=False) for item in events
-            )
-            log_path.write_text(serialized + "\n", encoding="utf-8")
+            with log_path.open("a", encoding="utf-8") as handle:
+                for item in events:
+                    handle.write(json.dumps(asdict(item), ensure_ascii=False) + "\n")
         return events

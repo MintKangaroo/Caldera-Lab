@@ -85,7 +85,25 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
 - `local` executor는 개발용이며 `--allow-local` 없이는 CLI에서 거부됩니다.
 - 반드시 소유하거나 명시적으로 허가된 격리 랩에서만 사용합니다.
 
+## 5-1. 후속 세션(2026-08-29)에서 수정한 것
+
+- `collect-workspace-files`가 항상 실패하던 문제 수정: Docker executor가 `/workspace`를
+  read-only 바인드 마운트합니다(`--workspace` CLI 플래그, 기본 `.runtime/workspace`).
+- 감사 로그를 덮어쓰기(`write_text`)에서 append로 변경하고 이벤트마다 `run_id`를 부여했습니다.
+- `__main__.py`의 import 시점 `main()` 실행을 `if __name__ == "__main__"` 가드로 교체했습니다.
+- `policy.py`의 도달 불가능한 승인 조건을 실제 게이트로 교체했습니다:
+  `allowed_risks`, `Ability.requires_network` + `allow_network`, `approved_abilities`.
+- Docker 인자에 `--pull never`, `--memory 256m`, `--cpus 1.0`을 추가했습니다.
+- `cli.main(argv)`로 테스트 가능하게 만들고 `--steps` 양수 검증을 추가했습니다.
+- 이름과 다른 것을 검증하던 CLI 게이트 테스트를 실제 게이트 테스트로 교체하고,
+  LLM이 catalog 밖 ID/shell 문자열을 반환하는 경우의 negative test를 추가했습니다.
+- 테스트 6개 -> 15개.
+
 ## 6. 다음 세션 우선순위
+
+0. **RL 설계 결함**: `rl.py`의 state는 누적 관측의 SHA256이라 모든 state가 유일해집니다.
+   Q 테이블 항목이 재방문되지 않아 학습이 사실상 ε-greedy 랜덤과 동일합니다. state를
+   추상화(수행 완료 ability 집합 등)한 뒤에 아래 3번(영속화)을 진행해야 의미가 있습니다.
 
 1. **에이전트 통신 계층**: 현재는 CLI가 Docker executor를 직접 호출합니다. 다음 단계로
    loopback 전용 heartbeat/result protocol을 추가하되, 외부 bind와 임의 command 전달은 금지합니다.

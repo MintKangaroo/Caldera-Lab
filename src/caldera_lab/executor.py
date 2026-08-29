@@ -63,14 +63,32 @@ class LocalLabExecutor:
 
 
 class DockerLabExecutor:
-    def __init__(self, image: str = "caldera-lab-agent:latest") -> None:
+    """Runs one ability per throwaway container with no network and no privileges."""
+
+    def __init__(
+        self,
+        image: str = "caldera-lab-agent:latest",
+        workspace: Path | None = None,
+    ) -> None:
         self.image = image
+        # The catalog exposes a /workspace discovery ability, so the lab must actually
+        # mount one. It is bind-mounted read-only: the agent may list it, never write it.
+        self.workspace = workspace or Path(".runtime/workspace").resolve()
+        self.workspace.mkdir(parents=True, exist_ok=True)
 
     def execute(self, ability: Ability, policy: LabPolicy) -> ExecutionResult:
         command = [
             "docker",
             "run",
             "--rm",
+            "--pull",
+            "never",
+            "--memory",
+            "256m",
+            "--cpus",
+            "1.0",
+            "--mount",
+            f"type=bind,src={self.workspace},dst=/workspace,readonly",
             "--network",
             "none" if not policy.allow_network else "bridge",
             "--read-only",
