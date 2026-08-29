@@ -1321,3 +1321,44 @@ def test_serve_cli_rejects_an_unknown_ability_in_a_policy() -> None:
 def test_serve_cli_rejects_a_malformed_policy_spec() -> None:
     with pytest.raises(SystemExit):
         cli.main(["serve", "--executor", "dry-run", "--agent-policy", "missing-equals"])
+
+
+def test_state_is_built_from_issued_not_completed_work(catalog: AbilityCatalog) -> None:
+    coordinator = Coordinator(catalog, planner_mode="rules", max_steps=4)
+    first = coordinator.next_ability("a")
+    second = coordinator.next_ability("b")
+    assert first != second
+    approved = [e for e in coordinator.events if e.event == "ability.approved"]
+    assert len(approved) == 2
+    # Neither has reported yet. Built from completions, both hand-outs would
+    # have shared the empty state and fought over one table entry.
+    pending_states = {value[0] for value in coordinator._pending.values()}
+    assert len(pending_states) == 2
+    assert coordinator.rl.state_from(set(), "none") in pending_states
+
+
+def test_concurrent_dispatch_keeps_states_distinct(catalog: AbilityCatalog) -> None:
+    coordinator = Coordinator(catalog, planner_mode="rules", max_steps=6)
+    handed = [coordinator.next_ability(f"agent-{i}") for i in range(6)]
+    assert len(set(handed)) == 6
+    seen = [value[0] for value in coordinator._pending.values()]
+    assert len(set(seen)) == 6
+
+
+def test_sequential_state_sequence_is_unchanged(catalog: AbilityCatalog) -> None:
+    # Issued and completed coincide when one agent runs at a time, so a
+    # single-agent run must produce exactly the states it produced before.
+    orchestrator = Orchestrator(catalog, DryRunExecutor(), planner_mode="rules")
+    orchestrator.run(4)
+    masks = sorted(key[0] for key in orchestrator.rl.q)
+    assert masks[0] == "0" * len(catalog.ids()) + "|none"
+    assert all(mask.endswith("|planned") for mask in masks[1:])
+    assert len(set(masks)) == 4
+
+
+def test_state_from_matches_the_observation_derived_state(catalog: AbilityCatalog) -> None:
+    policy = QPolicy(catalog)
+    observations = ("collect-host-identity:succeeded:0", "collect-system-info:succeeded:0")
+    assert policy.state(observations) == policy.state_from(
+        {"collect-host-identity", "collect-system-info"}, "succeeded"
+    )

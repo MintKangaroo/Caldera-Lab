@@ -72,6 +72,7 @@ class Coordinator:
         self._lock = threading.Lock()
         self._observations: tuple[str, ...] = ()
         self._used: set[str] = set()
+        self._last_status = "none"
         self._issued = 0
         self._pending: dict[str, tuple[str, str]] = {}
         self._started = False
@@ -141,7 +142,9 @@ class Coordinator:
             if not candidates:
                 return None
             index = self._issued
-            state = self.rl.state(self._observations)
+            # Built from what has been issued, not what has finished, so two
+            # concurrent hand-outs do not collapse onto the same state.
+            state = self.rl.state_from(frozenset(self._used), self._last_status)
             policy = self.policy_for(agent_id)
             # Only offer this agent what its own policy permits, then validate;
             # otherwise one restricted agent would stall the whole run.
@@ -182,7 +185,11 @@ class Coordinator:
         with self._lock:
             key = f"{agent_id}:{result.ability_id}"
             state, ability_id = self._pending.pop(
-                key, (self.rl.state(self._observations), result.ability_id)
+                key,
+                (
+                    self.rl.state_from(frozenset(self._used), self._last_status),
+                    result.ability_id,
+                ),
             )
             ability = self.catalog.get(ability_id)
             self._emit("ability.completed", {"agent_id": agent_id, **asdict(result)})
@@ -195,7 +202,9 @@ class Coordinator:
                 "reward.scored",
                 {"agent_id": agent_id, "ability_id": ability_id, **breakdown.as_details()},
             )
-            self.rl.update(state, ability_id, breakdown.total, self.rl.state(self._observations))
+            self._last_status = result.status
+            next_state = self.rl.state_from(frozenset(self._used), self._last_status)
+            self.rl.update(state, ability_id, breakdown.total, next_state)
             remaining = self.limit - self._issued
             if remaining > 0:
                 plan = self.planner.plan(self._observations, remaining)

@@ -27,6 +27,18 @@ class QPolicy:
         self.gamma = gamma
         self.q: dict[tuple[str, str], float] = {}
 
+    def state_from(self, committed: frozenset[str] | set[str], last_status: str) -> str:
+        """Build a state from the abilities already committed and the last outcome.
+
+        "Committed" means issued, not finished. Under concurrent dispatch a
+        second agent is handed work before the first has reported, so a state
+        built from completions alone would be identical for both and the two
+        choices would fight over one table entry. Sequentially the two sets
+        coincide, so this leaves single-agent behaviour unchanged.
+        """
+        mask = "".join("1" if item in committed else "0" for item in self.catalog.ids())
+        return f"{mask}|{last_status or 'none'}"
+
     def state(self, observations: tuple[str, ...]) -> str:
         """Abstract observations into a state the table can actually revisit.
 
@@ -43,8 +55,7 @@ class QPolicy:
             if ability_id in self.catalog.ids():
                 completed.add(ability_id)
             last = status or "none"
-        mask = "".join("1" if item in completed else "0" for item in self.catalog.ids())
-        return f"{mask}|{last}"
+        return self.state_from(completed, last)
 
     def choose(self, state: str, candidates: tuple[str, ...]) -> str:
         if not candidates:

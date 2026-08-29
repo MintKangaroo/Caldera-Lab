@@ -136,10 +136,20 @@ allowlist가 거부한 ID 목록도 함께 보여줍니다.
 
 ### 동시 실행과 RL 신용 할당
 
-에이전트를 여러 개 붙이면 결과가 돌아오기 전에 여러 능력이 한꺼번에 배정됩니다. RL은 **배정
-시점의 state**를 보므로, 동시에 나간 능력들은 모두 같은 state에 기록됩니다(실측: 3 에이전트
-실행 시 3개 항목이 `0000|none` state를 공유). 이는 동시 dispatch의 정확한 의미이지만, 순차
-실행에 비해 신용 할당이 희석됩니다. 학습을 관찰하려면 `--agents 1`을 쓰세요.
+state는 **완료한 능력이 아니라 배정된 능력** 집합으로 계산합니다. 순차 실행에서는 두 집합이
+같으므로 동작이 동일하지만, 동시 실행에서는 결과가 오기 전에 배정이 나가므로 완료 기준으로는
+여러 배정이 같은 state로 뭉개집니다. 배정 기준으로 바꾼 결과:
+
+```text
+             완료 기반    배정 기반
+agents=1     8 states     8 states
+agents=2     4 states     8 states
+agents=4     2 states     8 states
+agents=6     3 states     8 states
+```
+
+다만 동시 실행의 state는 마지막 결과 성분이 아직 `|none`이므로, 순차 실행에서 학습한 Q table이
+동시 실행에 그대로 전이되지는 않습니다. 두 상황은 실제로 다른 상황이며, state가 이를 반영합니다.
 
 ### 변동성 출력 정규화
 
@@ -202,7 +212,7 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 100 passed
+pytest             -> 104 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
@@ -213,6 +223,7 @@ Multi-agent        -> 3 에이전트 동시 실행, 중복 배정 0건
 Coordinator        -> beacon 실행에서 plan/RL/reward 이벤트 생성, Q table 학습 확인
 ATT&CK coverage    -> 8 techniques (T1016/T1033/T1057/T1082/T1083/T1087.001/T1518/T1613)
 Timeout            -> timed-out 상태, 컨테이너 누수 0건 (수정 전: 컨테이너 계속 실행)
+RL credit          -> 4 에이전트 동시 실행 시 고유 state 2 -> 8 (순차와 동일)
 GitHub Actions     -> success (quality 3.10/3.12 + docker-smoke)
 ```
 
