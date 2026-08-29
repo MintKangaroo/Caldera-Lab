@@ -24,6 +24,7 @@ policy, Docker 경계, 감사 로그, 테스트를 함께 갱신해야 합니다
   Q table은 `--q-table`(기본 `.runtime/q_table.json`)에 저장됩니다.
 - 정보 이득 기반 보상: 종료 코드만 보지 않고 "새로 알아낸 사실"을 셉니다.
   `total = outcome + information_gain - cost`이며, 항마다 감사 로그에 남습니다.
+  실행마다 변하는 출력은 catalog의 `volatile_patterns`로 능력별로 선언해 제외합니다.
 - 실제 agent execution: 기본 실행기는 Docker 컨테이너이며 `network none`, read-only rootfs,
   `cap-drop ALL`, `no-new-privileges`, PID·메모리·CPU 제한, `--pull never`를 적용합니다.
 - 감사 가능성: 계획, 승인, 실행 결과를 `run_id`가 붙은 JSONL 이벤트 로그에 append합니다.
@@ -88,11 +89,25 @@ allowlist가 거부한 ID 목록도 함께 보여줍니다.
 베이스 이미지는 digest로 고정되어 있습니다. 갱신 시 CI의 `docker-smoke` 잡을 다시 통과시켜야
 합니다. 안전 경계와 능력 추가 절차는 [`SECURITY.md`](SECURITY.md)를 따르세요.
 
-### 보상 설계의 알려진 한계
+### 변동성 출력 정규화
 
-정보 이득은 stdout 라인을 정규화해 중복을 판별합니다. 따라서 실행마다 값이 바뀌는 출력
-(`uname -a`의 컨테이너 hostname, `ps`의 PID·시각)은 실제로 새 정보가 아니어도 매번 novel로
-집계됩니다. 현재 동작은 테스트로 고정해 두었으므로, 개선 시 의도적으로 갱신해야 합니다.
+정보 이득은 stdout 라인 단위로 중복을 판별하므로, 실행마다 바뀌는 출력(`uname -a`의 컨테이너
+hostname, `ps`의 CPU·시각 컬럼)은 새 정보가 아닌데도 novel로 집계될 수 있습니다. 이를
+catalog의 `volatile_patterns`로 **능력별로 선언**해 해결합니다.
+
+```json
+{
+  "id": "collect-system-info",
+  "command": ["uname", "-a"],
+  "volatile_patterns": ["\\b[0-9a-f]{12}\\b"]
+}
+```
+
+일치하는 부분은 `<volatile>`로 치환한 뒤 비교합니다. 패턴은 선언 순서대로 적용되므로,
+뒤 패턴이 지울 문맥에 의존하는 패턴을 먼저 두어야 합니다(`ps`의 CPU 컬럼은 뒤따르는 시각으로
+식별하므로 시각 패턴보다 앞에 옵니다). 전역 휴리스틱으로 숫자를 일괄 치환하지 않는 이유는
+`uid=65534` 같은 실제 발견까지 지워지기 때문입니다. 잘못된 정규식은 catalog 로드 시점에
+거부됩니다.
 
 ## 안전 경계
 
@@ -126,11 +141,11 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 50 passed
+pytest             -> 54 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
-Reward             -> 최초 실행 1.24, 동일 능력 반복 시 0.21 (정보 이득 1.0 -> 0.0)
+Reward             -> 최초 실행 1.24, 동일 능력 반복 시 0.24 (4개 능력 모두 정보 이득 0.0)
 Docker smoke       -> 4 executions, 0 failures (digest 고정 이미지 기준)
 GitHub Actions     -> success (quality 3.10/3.12 + docker-smoke)
 ```

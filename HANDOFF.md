@@ -125,7 +125,12 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
   `executor.SUCCESS_STATUSES`로 정의를 공유. (2) `dataclasses.asdict`가 Counter를 items에서
   재구성해 키를 튜플로 망가뜨리던 문제 -> `RunSummary.as_dict()`로 명시적 직렬화.
 - GitHub Actions 액션 버전을 갱신했습니다(Node 20 deprecation).
-- 테스트 6개 -> 50개.
+- 보상의 변동성 출력 문제를 해결했습니다. catalog에 `volatile_patterns`(능력별 정규식)를
+  추가해 일치 부분을 `<volatile>`로 치환한 뒤 비교합니다. `collect-system-info`는 컨테이너
+  hostname, `collect-process-list`는 CPU·시각 컬럼을 선언했습니다. 전역 휴리스틱을 쓰지 않은
+  이유는 `uid=65534` 같은 실제 발견까지 지워지기 때문입니다. 잘못된 정규식은 로드 시 거부됩니다.
+  실측: 8단계 실행에서 반복된 4개 능력 모두 정보 이득 1.0/0.5 -> 0.0.
+- 테스트 6개 -> 54개.
 
 ## 6. 다음 세션 우선순위
 
@@ -133,8 +138,7 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
    loopback 전용 heartbeat/result protocol을 추가하되, 외부 bind와 임의 command 전달은 금지합니다.
 2. ~~**LLM planner 계약 강화**~~: 완료(5-1 참고). 실제 API 키로의 end-to-end 검증은 아직
    수행하지 않았습니다. 스텁 기반 테스트만 있습니다.
-3. ~~**RL 학습 지속성**~~, ~~**보상 설계**~~: 완료(5-1 참고). 남은 것은 변동성 출력의
-   정규화입니다.
+3. ~~**RL 학습 지속성**~~, ~~**보상 설계**~~, ~~**변동성 출력 정규화**~~: 완료(5-1 참고).
 4. **능력 catalog 확장**: 새로운 low-risk discovery 능력부터 추가하고 각 항목에 negative test,
    timeout test, Docker 실행 검증을 함께 추가합니다.
 5. **대시보드 연동**: 현재 대시보드는 `make test`만 제공합니다. `caldera-lab report --json`

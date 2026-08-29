@@ -393,17 +393,66 @@ def test_orchestrator_resets_novelty_between_runs(catalog: AbilityCatalog) -> No
     assert gains() == gains()
 
 
-def test_reward_counts_volatile_output_as_new_information() -> None:
-    """Known limitation: output that changes every run always looks informative.
-
-    `uname -a` embeds the container hostname, so a repeat scores full gain.
-    Pinned here so a future fix has to update this deliberately.
-    """
+def test_reward_ignores_output_an_ability_declares_volatile(catalog: AbilityCatalog) -> None:
+    """The hostname in `uname -a` changes every run without being a discovery."""
+    ability = catalog.get("collect-system-info")
+    assert ability.volatile_patterns
     model = RewardModel()
     policy = LabPolicy()
-    model.score(_result("Linux 1e79fc82fa62 6.18.33.2 x86_64\n"), policy)
-    repeat = model.score(_result("Linux f89550a4fead 6.18.33.2 x86_64\n"), policy)
-    assert repeat.information_gain == 1.0
+    model.score(_result("Linux 1e79fc82fa62 6.18.33.2 x86_64\n"), policy, ability)
+    repeat = model.score(_result("Linux f89550a4fead 6.18.33.2 x86_64\n"), policy, ability)
+    assert repeat.information_gain == 0.0
+    assert repeat.normalized is True
+
+
+def test_reward_still_sees_real_change_in_a_normalised_ability(catalog: AbilityCatalog) -> None:
+    # Masking must not blind the model to the parts that actually differ.
+    ability = catalog.get("collect-system-info")
+    model = RewardModel()
+    model.score(_result("Linux 1e79fc82fa62 6.18.33.2 x86_64\n"), LabPolicy(), ability)
+    changed = model.score(_result("Linux f89550a4fead 7.0.0 aarch64\n"), LabPolicy(), ability)
+    assert changed.information_gain == 1.0
+
+
+def test_process_list_patterns_mask_cpu_and_times(catalog: AbilityCatalog) -> None:
+    patterns = catalog.get("collect-process-list").volatile_patterns
+    first = RewardModel.facts("nobody 1 0 38 03:45 ?        00:00:00 ps -ef\n", patterns)
+    second = RewardModel.facts("nobody 1 0 40 03:52 ?        00:00:01 ps -ef\n", patterns)
+    assert first == second
+    # The uid and pid are still there: only the volatile columns were masked.
+    assert first == ["nobody 1 0 <volatile> <volatile> ? <volatile> ps -ef"]
+
+
+def test_abilities_without_patterns_keep_exact_matching(catalog: AbilityCatalog) -> None:
+    ability = catalog.get("collect-host-identity")
+    assert ability.volatile_patterns == ()
+    model = RewardModel()
+    model.score(_result("uid=65534(nobody)\n"), LabPolicy(), ability)
+    # A different uid is a real finding and must not be masked away.
+    changed = model.score(_result("uid=0(root)\n"), LabPolicy(), ability)
+    assert changed.information_gain == 1.0
+    assert changed.normalized is False
+
+
+def test_catalog_rejects_an_invalid_volatile_pattern(tmp_path: Path) -> None:
+    path = tmp_path / "abilities.json"
+    entry = {
+        "id": "broken",
+        "name": "Broken",
+        "tactic": "discovery",
+        "technique": "T1082",
+        "command": ["true"],
+        "description": "Ability with a regex that does not compile.",
+        "volatile_patterns": ["([unclosed"],
+    }
+    path.write_text(json.dumps([entry]), encoding="utf-8")
+    with pytest.raises(ValueError, match="Invalid volatile_patterns"):
+        AbilityCatalog.from_json(path)
+
+    entry["volatile_patterns"] = "not-a-list"
+    path.write_text(json.dumps([entry]), encoding="utf-8")
+    with pytest.raises(ValueError, match="must be an array of strings"):
+        AbilityCatalog.from_json(path)
 
 
 def test_llm_planner_constrains_output_with_a_schema(

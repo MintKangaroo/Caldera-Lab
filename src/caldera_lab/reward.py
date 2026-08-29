@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 
+from .catalog import Ability
 from .executor import SUCCESS_STATUSES, ExecutionResult
 from .policy import LabPolicy
 
@@ -17,6 +20,7 @@ class RewardBreakdown:
     cost: float
     novel_facts: int
     known_facts: int
+    normalized: bool = False
 
     def as_details(self) -> dict[str, object]:
         return {key: value for key, value in asdict(self).items()}
@@ -49,18 +53,38 @@ class RewardModel:
         self._seen.clear()
 
     @staticmethod
-    def facts(stdout: str) -> list[str]:
-        """Normalise output into comparable facts, one per non-blank line."""
-        return [" ".join(line.split()) for line in stdout.splitlines() if line.strip()]
+    def facts(stdout: str, volatile_patterns: tuple[str, ...] = ()) -> list[str]:
+        """Normalise output into comparable facts, one per non-blank line.
 
-    def score(self, result: ExecutionResult, policy: LabPolicy) -> RewardBreakdown:
+        Whitespace is collapsed, then any pattern the ability declares volatile
+        is masked, so output that merely changes between runs (a container
+        hostname, a PID, a timestamp) stops looking like a new discovery.
+        """
+        compiled = _compile(volatile_patterns)
+        collected: list[str] = []
+        for line in stdout.splitlines():
+            if not line.strip():
+                continue
+            fact = " ".join(line.split())
+            for expression in compiled:
+                fact = expression.sub("<volatile>", fact)
+            collected.append(fact)
+        return collected
+
+    def score(
+        self,
+        result: ExecutionResult,
+        policy: LabPolicy,
+        ability: Ability | None = None,
+    ) -> RewardBreakdown:
         succeeded = result.status in SUCCESS_STATUSES
         outcome = self.success_reward if succeeded else self.failure_penalty
 
+        patterns = ability.volatile_patterns if ability else ()
         novel = 0
         known = 0
         if succeeded:
-            for fact in self.facts(result.stdout):
+            for fact in self.facts(result.stdout, patterns):
                 digest = hashlib.sha256(fact.encode("utf-8")).hexdigest()
                 if digest in self._seen:
                     known += 1
@@ -80,4 +104,10 @@ class RewardModel:
             cost=round(cost, 6),
             novel_facts=novel,
             known_facts=known,
+            normalized=bool(patterns),
         )
+
+
+@lru_cache(maxsize=128)
+def _compile(patterns: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
+    return tuple(re.compile(pattern) for pattern in patterns)

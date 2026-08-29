@@ -114,7 +114,7 @@ class Orchestrator:
             result = self.executor.execute(ability, self.policy)
             events.append(Event(now(), self.run_id, "ability.completed", asdict(result)))
             observations = (*observations, f"{ability.id}:{result.status}:{result.return_code}")
-            breakdown = self.reward_model.score(result, self.policy)
+            breakdown = self.reward_model.score(result, self.policy, ability)
             events.append(
                 Event(
                     now(),
