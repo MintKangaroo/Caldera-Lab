@@ -67,6 +67,8 @@ class BeaconAgent:
                     "return_code": result.return_code,
                     "stdout": result.stdout,
                     "stderr": result.stderr,
+                    "isolation": result.isolation,
+                    "duration_seconds": result.duration_seconds,
                 },
             )
             executed.append(ability_id)

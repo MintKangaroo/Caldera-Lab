@@ -3,15 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 import threading
-import uuid
 from dataclasses import asdict
 from pathlib import Path
 
 from .agent import BeaconAgent
 from .beacon import BeaconServer, BeaconState
 from .catalog import AbilityCatalog
-from .executor import DockerLabExecutor, DryRunExecutor, LocalLabExecutor
-from .orchestrator import Event, Orchestrator, now
+from .coordinator import Coordinator
+from .executor import DockerLabExecutor, DryRunExecutor, ExecutionResult, LocalLabExecutor
+from .orchestrator import Event, Orchestrator, now, write_events
 from .policy import LabPolicy
 from .report import coverage, load_events, render, summarize
 
@@ -86,16 +86,43 @@ def _serve(
     parser: argparse.ArgumentParser, catalog: AbilityCatalog, args: argparse.Namespace
 ) -> None:
     executor = _build_executor(parser, args)
-    queue = catalog.ids()[: args.steps]
-    run_id = uuid.uuid4().hex[:12]
-    sink = _EventSink(run_id, args.log)
-    state = BeaconState(catalog, queue=queue, on_event=sink.record)
+    policy = LabPolicy()
+    coordinator = Coordinator(
+        catalog,
+        policy=policy,
+        planner_mode=args.planner,
+        q_table_path=None if args.no_q_table else args.q_table,
+        max_steps=args.steps,
+    )
+    sink = _EventSink(coordinator.run_id, args.log)
+
+    def record(agent_id: str, entry: dict[str, object]) -> None:
+        coordinator.record_result(
+            ExecutionResult(
+                ability_id=str(entry["ability_id"]),
+                status=str(entry["status"]),
+                stdout=str(entry["stdout"]),
+                stderr=str(entry["stderr"]),
+                return_code=int(entry["return_code"]),
+                isolation=str(entry.get("isolation", "unknown")),
+                duration_seconds=float(entry.get("duration_seconds") or 0.0),
+            ),
+            agent_id=agent_id,
+        )
+
+    # The beacon queue is the planner and the RL policy, not a fixed list.
+    state = BeaconState(
+        catalog,
+        on_event=sink.record,
+        task_source=coordinator.next_ability,
+        result_sink=record,
+    )
     failures: list[BaseException] = []
 
     with BeaconServer(state) as server:
         print(f"beacon listening on {server.url} (token is per-run and not persisted)")
         agents = [
-            BeaconAgent(catalog, executor, server.url, server.token, LabPolicy())
+            BeaconAgent(catalog, executor, server.url, server.token, policy)
             for _ in range(args.agents)
         ]
 
@@ -111,6 +138,8 @@ def _serve(
         for thread in threads:
             thread.join()
 
+    events = coordinator.finish()
+    write_events(events, args.log)
     sink.flush()
     for agent in agents:
         record = state.agents[agent.agent_id]
@@ -118,7 +147,10 @@ def _serve(
         for result in record.results:
             first_line = result["stdout"].splitlines()[0] if result["stdout"] else ""
             print(f"  {result['ability_id']:<26}{result['status']:<12}{first_line[:60]}")
-    print(f"run {run_id}: {len(sink.events)} beacon events -> {args.log}")
+    print(
+        f"run {coordinator.run_id}: {len(events)} coordinator + "
+        f"{len(sink.events)} beacon events -> {args.log}"
+    )
     if failures:
         parser.exit(1, f"{len(failures)} agent(s) failed: {failures[0]}\n")
 
@@ -153,12 +185,15 @@ def main(argv: list[str] | None = None) -> None:
         "serve", help="run the loopback beacon server and drive one agent through it"
     )
     serve.add_argument("--executor", choices=("docker", "local", "dry-run"), default="docker")
+    serve.add_argument("--planner", choices=("rules", "llm", "hybrid"), default="hybrid")
     serve.add_argument("--steps", type=positive_int, default=4)
     serve.add_argument(
         "--agents", type=positive_int, default=1, help="agents beaconing concurrently"
     )
     serve.add_argument("--workspace", type=Path, default=None)
     serve.add_argument("--log", type=Path, default=Path(".runtime/run.jsonl"))
+    serve.add_argument("--q-table", type=Path, default=Path(".runtime/q_table.json"))
+    serve.add_argument("--no-q-table", action="store_true")
     serve.add_argument("--allow-local", action="store_true")
 
     report = sub.add_parser("report", help="summarise an audit log")

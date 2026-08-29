@@ -44,11 +44,18 @@ class BeaconState:
         catalog: AbilityCatalog,
         queue: tuple[str, ...] = (),
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
+        task_source: Callable[[str], str | None] | None = None,
+        result_sink: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.catalog = catalog
         for ability_id in queue:
             self.catalog.get(ability_id)
         self.queue: list[str] = list(queue)
+        # When a coordinator is supplied, the planner and the RL policy decide
+        # what each agent gets. The static queue is only the fallback used by
+        # tests and by a lab that deliberately wants a fixed sequence.
+        self.task_source = task_source
+        self.result_sink = result_sink
         self.agents: dict[str, AgentRecord] = {}
         self.token = secrets.token_urlsafe(32)
         self._lock = threading.Lock()
@@ -71,9 +78,16 @@ class BeaconState:
             if record is None:
                 raise UnknownAgent(agent_id)
             record.registered_at_beacons += 1
-            ability_id = self.queue.pop(0) if self.queue else None
             beacons = record.registered_at_beacons
-            remaining = len(self.queue)
+            if self.task_source is not None:
+                ability_id = self.task_source(agent_id)
+                if ability_id is not None:
+                    # A coordinator can only name what the catalog declares.
+                    self.catalog.get(ability_id)
+                remaining = -1
+            else:
+                ability_id = self.queue.pop(0) if self.queue else None
+                remaining = len(self.queue)
         self._emit(
             "agent.tasked",
             {
@@ -108,8 +122,12 @@ class BeaconState:
                 "return_code": int(payload.get("return_code", -1)),
                 "stdout": str(payload.get("stdout", ""))[:MAX_BODY_BYTES],
                 "stderr": str(payload.get("stderr", ""))[:MAX_BODY_BYTES],
+                "isolation": str(payload.get("isolation", "unknown")),
+                "duration_seconds": float(payload.get("duration_seconds") or 0.0),
             }
             record.results.append(entry)
+        if self.result_sink is not None:
+            self.result_sink(agent_id, dict(entry))
         # Output stays in the agent record; the audit event carries the shape of
         # what happened, not a second copy of every byte collected.
         self._emit(
@@ -119,6 +137,7 @@ class BeaconState:
                 "ability_id": ability_id,
                 "status": entry["status"],
                 "return_code": entry["return_code"],
+                "isolation": entry["isolation"],
                 "stdout_bytes": len(entry["stdout"]),
             },
         )

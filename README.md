@@ -34,12 +34,17 @@ policy, Docker 경계, 감사 로그, 테스트를 함께 갱신해야 합니다
 
 ```mermaid
 flowchart LR
-  O[Observations] --> L[LLM planner]
-  O --> R[RL policy]
+  O[Observations] --> C[Coordinator]
+  C --> L[LLM planner]
+  C --> R[RL policy]
   L --> V[Allowlist + LabPolicy]
   R --> V
-  V --> A[Approved ability]
-  A --> D[Docker isolated agent]
+  V --> A[Approved ability id]
+  A --> S[Sequential run]
+  A --> B[Beacon server 127.0.0.1]
+  B --> G[Lab agent]
+  S --> D[Docker isolated container]
+  G --> D
   D --> E[JSONL audit event]
   E --> O
 ```
@@ -81,6 +86,11 @@ PYTHONPATH=src python3 -m caldera_lab run --executor local --allow-local --steps
 PYTHONPATH=src python3 -m caldera_lab serve --executor docker --steps 4 --agents 3
 ```
 
+**beacon 큐는 별도의 단순 목록이 아니라 planner와 RL 자체입니다.** 서버는 `Coordinator`에게
+다음 능력을 물어보고, Coordinator가 계획·RL 선택·정책 검증을 거쳐 ID를 반환합니다. 결과가
+돌아오면 보상을 계산하고 Q table을 갱신한 뒤 재계획합니다. 순차 실행(`run`)과 beacon 실행
+(`serve`)이 **같은 Coordinator를 공유**하므로 감사 이벤트 어휘도 동일합니다.
+
 beacon 서버는 `127.0.0.1`에만 바인드하며(다른 주소는 거부), 실행마다 새 토큰을 발급하고
 저장하지 않습니다. **서버는 명령 문자열을 보내지 않고 catalog의 ability ID만 보냅니다.**
 에이전트는 그 ID를 자신의 로컬 catalog에서 해석하고 정책 검증을 다시 통과시킨 뒤 실행합니다.
@@ -89,8 +99,8 @@ beacon 서버는 `127.0.0.1`에만 바인드하며(다른 주소는 거부), 실
 beacon을 쓰는 주체는 컨테이너가 아니라 **랩 측 supervisor 프로세스**입니다. 컨테이너 안에서는
 소켓이 전혀 필요 없으므로 `--network none`이 그대로 유지됩니다.
 
-`--agents N`으로 여러 에이전트를 동시에 붙일 수 있습니다. 큐는 락 아래에서 분배되므로 같은
-능력이 두 에이전트에 배정되지 않습니다. `agent.registered` / `agent.tasked` / `agent.reported`
+`--agents N`으로 여러 에이전트를 동시에 붙일 수 있습니다. 배정은 락 아래에서 이뤄지므로 같은
+능력이 두 에이전트에 배정되지 않고, `--steps` 예산도 에이전트 전체가 공유합니다. `agent.registered` / `agent.tasked` / `agent.reported`
 이벤트가 `run_id`와 함께 감사 로그에 append되며, `report`가 이를 집계합니다.
 
 실행 결과를 요약하려면:
@@ -108,6 +118,13 @@ allowlist가 거부한 ID 목록도 함께 보여줍니다.
 
 베이스 이미지는 digest로 고정되어 있습니다. 갱신 시 CI의 `docker-smoke` 잡을 다시 통과시켜야
 합니다. 안전 경계와 능력 추가 절차는 [`SECURITY.md`](SECURITY.md)를 따르세요.
+
+### 동시 실행과 RL 신용 할당
+
+에이전트를 여러 개 붙이면 결과가 돌아오기 전에 여러 능력이 한꺼번에 배정됩니다. RL은 **배정
+시점의 state**를 보므로, 동시에 나간 능력들은 모두 같은 state에 기록됩니다(실측: 3 에이전트
+실행 시 3개 항목이 `0000|none` state를 공유). 이는 동시 dispatch의 정확한 의미이지만, 순차
+실행에 비해 신용 할당이 희석됩니다. 학습을 관찰하려면 `--agents 1`을 쓰세요.
 
 ### 변동성 출력 정규화
 
@@ -162,14 +179,15 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 74 passed
+pytest             -> 78 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
 Reward             -> 최초 실행 1.24, 동일 능력 반복 시 0.24 (4개 능력 모두 정보 이득 0.0)
 Docker smoke       -> 4 executions, 0 failures (digest 고정 이미지 기준)
 Beacon             -> 127.0.0.1 전용 바인드, 4/4 실행 (컨테이너는 --network none 유지)
-Multi-agent        -> 3 에이전트 동시 실행, 중복 배정 0건, 14 beacon 이벤트 기록
+Multi-agent        -> 3 에이전트 동시 실행, 중복 배정 0건
+Coordinator        -> beacon 실행에서 plan/RL/reward 이벤트 생성, Q table 4 entries 학습
 GitHub Actions     -> success (quality 3.10/3.12 + docker-smoke)
 ```
 
@@ -185,6 +203,7 @@ Caldera_Lab/
 ├── src/caldera_lab/rl.py        # tabular Q policy + JSON 영속화
 ├── src/caldera_lab/reward.py    # 정보 이득 기반 보상
 ├── src/caldera_lab/report.py    # 감사 로그 집계 + ATT&CK 커버리지
+├── src/caldera_lab/coordinator.py  # planner+RL+보상 단일 결정 지점
 ├── src/caldera_lab/beacon.py    # loopback 전용 beacon 서버
 ├── src/caldera_lab/agent.py     # beacon 에이전트 (랩 측 supervisor)
 ├── src/caldera_lab/policy.py    # risk/network/승인 게이트

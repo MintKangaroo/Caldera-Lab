@@ -25,6 +25,8 @@ class RunSummary:
     duration_seconds: float = 0.0
     agents: Counter[str] = field(default_factory=Counter)
     beacon_tasks: int = 0
+    beacon_succeeded: Counter[str] = field(default_factory=Counter)
+    beacon_failed: Counter[str] = field(default_factory=Counter)
 
     @property
     def executions(self) -> int:
@@ -50,6 +52,8 @@ class RunSummary:
             "isolations": dict(self.isolations),
             "agents": dict(self.agents),
             "beacon_tasks": self.beacon_tasks,
+            "beacon_reports": sum(self.beacon_succeeded.values())
+            + sum(self.beacon_failed.values()),
             "reward_total": round(self.reward_total, 6),
             "information_gain": round(self.information_gain, 6),
             "duration_seconds": round(self.duration_seconds, 3),
@@ -101,13 +105,25 @@ def summarize(events: list[dict[str, object]]) -> dict[str, RunSummary]:
             if name == "agent.tasked" and details.get("ability_id"):
                 summary.beacon_tasks += 1
             if name == "agent.reported":
+                # An execution driven through the beacon produces both an
+                # agent.reported and an ability.completed. Counting both would
+                # double every beacon run, so these are kept apart and only
+                # folded in when no coordinator recorded the run.
                 ability_id = str(details.get("ability_id", "unknown"))
                 status = str(details.get("status", ""))
-                bucket = summary.succeeded if status in SUCCESS_STATUSES else summary.failed
+                bucket = (
+                    summary.beacon_succeeded
+                    if status in SUCCESS_STATUSES
+                    else summary.beacon_failed
+                )
                 bucket[ability_id] += 1
         elif name == "reward.scored":
             summary.reward_total += float(details.get("total") or 0.0)
             summary.information_gain += float(details.get("information_gain") or 0.0)
+    for summary in runs.values():
+        if not summary.succeeded and not summary.failed:
+            summary.succeeded = summary.beacon_succeeded
+            summary.failed = summary.beacon_failed
     return runs
 
 

@@ -148,12 +148,21 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
     로그에 append합니다. `agent.reported`는 수집한 출력을 복제하지 않고 크기만 기록합니다.
   - `serve --agents N`으로 동시 구동. 실측: 3 에이전트가 4개 큐를 중복 없이 분배.
   - `report`가 beacon 이벤트를 집계하도록 확장했습니다.
-- 테스트 6개 -> 74개.
+- `Coordinator`를 추출해 실행 경로 이중화를 제거했습니다. `serve`가 `catalog.ids()[:steps]`
+  단순 큐를 쓰면서 planner와 RL을 통째로 우회하고 있었습니다. 이제 beacon 서버가
+  `Coordinator.next_ability`를 task source로 쓰고, 결과는 `record_result`로 흘러 보상과
+  Q table 갱신까지 이어집니다. `Orchestrator`도 같은 Coordinator 위에서 다시 작성했습니다.
+- `report`의 이중 집계 버그를 수정했습니다. beacon 실행은 `ability.completed`와
+  `agent.reported`를 모두 남기므로 실행 수가 두 배로 세어졌습니다. 이제 분리 집계하고,
+  coordinator 이벤트가 없는 로그에서만 beacon 결과를 폴백으로 씁니다.
+- 알려진 특성: 동시 dispatch에서는 RL이 배정 시점 state를 보므로 동시에 나간 능력들이 같은
+  state를 공유합니다. 학습 관찰 시 `--agents 1` 권장. README에 문서화함.
+- 테스트 6개 -> 78개.
 
 ## 6. 다음 세션 우선순위
 
 1. ~~**에이전트 통신 계층**~~: 완료(5-1 참고). 남은 것: 에이전트별 정책 분리(현재는 모든
-   에이전트가 같은 `LabPolicy`를 공유), 재접속/재시도 시맨틱, beacon 큐를 planner/RL과 연결.
+   에이전트가 같은 `LabPolicy`를 공유), 재접속/재시도 시맨틱, 동시 실행에서의 RL 신용 할당.
 2. ~~**LLM planner 계약 강화**~~: 완료(5-1 참고). 실제 API 키로의 end-to-end 검증은 아직
    수행하지 않았습니다. 스텁 기반 테스트만 있습니다.
 3. ~~**RL 학습 지속성**~~, ~~**보상 설계**~~, ~~**변동성 출력 정규화**~~: 완료(5-1 참고).

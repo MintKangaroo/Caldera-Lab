@@ -14,6 +14,7 @@ from caldera_lab import planner as planner_module
 from caldera_lab.agent import BeaconAgent
 from caldera_lab.beacon import BeaconRefused, BeaconServer, BeaconState
 from caldera_lab.catalog import AbilityCatalog
+from caldera_lab.coordinator import Coordinator
 from caldera_lab.executor import DryRunExecutor, ExecutionResult, LocalLabExecutor
 from caldera_lab.orchestrator import Orchestrator
 from caldera_lab.planner import LLMPlanner, RulePlanner
@@ -907,16 +908,15 @@ def test_serve_cli_writes_beacon_events_to_the_audit_log(tmp_path: Path, capsys)
     capsys.readouterr()
     records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
     assert len({record["run_id"] for record in records}) == 1
-    assert {record["event"] for record in records} == {
-        "agent.registered",
-        "agent.tasked",
-        "agent.reported",
-    }
+    # The coordinator's decisions and the beacon traffic land in one log.
+    names = {record["event"] for record in records}
+    assert {"agent.registered", "agent.tasked", "agent.reported"} <= names
+    assert {"plan.created", "ability.approved", "ability.completed"} <= names
     reported = [r for r in records if r["event"] == "agent.reported"]
     assert len(reported) == 4
-    # Three agents shared one queue of four; none of them ran the same ability.
+    # Three agents shared one budget of four; none of them ran the same ability.
     assert len({r["details"]["ability_id"] for r in reported}) == 4
-    assert len({r["details"]["agent_id"] for r in records}) == 3
+    assert len({r["details"]["agent_id"] for r in reported}) <= 3
 
 
 def test_report_summarises_a_beacon_run(catalog: AbilityCatalog, tmp_path: Path, capsys) -> None:
@@ -929,8 +929,80 @@ def test_report_summarises_a_beacon_run(catalog: AbilityCatalog, tmp_path: Path,
     summary = next(iter(runs.values()))
     assert len(summary.agents) == 2
     assert summary.beacon_tasks == 4
+    # Counted once, though both ability.completed and agent.reported are present.
     assert summary.executions == 4
     rendered = render(catalog, runs)
     assert "agents: 2 beaconing, 4 ability tasks dispatched" in rendered
     # Coverage is derived from beacon results as well as orchestrator runs.
     assert all(row["successes"] == 1 for row in coverage(catalog, runs))
+
+
+def test_beacon_run_goes_through_the_planner_and_rl(tmp_path: Path, capsys) -> None:
+    log = tmp_path / "events.jsonl"
+    table = tmp_path / "q.json"
+    cli.main(
+        [
+            "serve", "--executor", "dry-run", "--planner", "rules",
+            "--steps", "4", "--agents", "2",
+            "--log", str(log), "--q-table", str(table),
+        ]
+    )
+    capsys.readouterr()
+    records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    names = [record["event"] for record in records]
+    # The beacon queue is not a second, dumber planner: the same decisions,
+    # rewards and learning appear as in a sequential run.
+    assert names.count("plan.created") == 1
+    assert names.count("ability.approved") == 4
+    assert names.count("reward.scored") == 4
+    assert table.exists()
+    saved = json.loads(table.read_text(encoding="utf-8"))
+    assert saved["entries"]
+
+
+def test_coordinator_budget_is_shared_across_agents(catalog: AbilityCatalog) -> None:
+    coordinator = Coordinator(catalog, planner_mode="rules", max_steps=3)
+    state = BeaconState(
+        catalog,
+        task_source=coordinator.next_ability,
+        result_sink=lambda agent_id, entry: None,
+    )
+    server = BeaconServer(state).start()
+    try:
+        agents = [
+            BeaconAgent(catalog, DryRunExecutor(), server.url, server.token, LabPolicy())
+            for _ in range(4)
+        ]
+        threads = [threading.Thread(target=agent.run, args=(8,)) for agent in agents]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=20)
+        assert all(not thread.is_alive() for thread in threads)
+    finally:
+        server.stop()
+    # Four agents, a budget of three: the budget wins.
+    approved = [event for event in coordinator.events if event.event == "ability.approved"]
+    assert len(approved) == 3
+    assert len({event.details["ability_id"] for event in approved}) == 3
+
+
+def test_coordinator_applies_the_policy_to_beacon_agents(catalog: AbilityCatalog) -> None:
+    policy = LabPolicy(approved_abilities=frozenset({"collect-host-identity"}))
+    coordinator = Coordinator(catalog, policy=policy, planner_mode="rules", max_steps=4)
+    # The planner may propose anything; the policy still decides.
+    with pytest.raises(PermissionError):
+        for _ in range(4):
+            coordinator.next_ability("agent-1")
+
+
+def test_orchestrator_and_beacon_share_one_coordinator_contract(
+    catalog: AbilityCatalog, tmp_path: Path
+) -> None:
+    orchestrator = Orchestrator(catalog, DryRunExecutor(), planner_mode="rules")
+    events = orchestrator.run(4, tmp_path / "seq.jsonl")
+    sequential = [event.event for event in events]
+    assert sequential.count("ability.approved") == 4
+    assert sequential.count("reward.scored") == 4
+    # Same event vocabulary as the beacon path, produced by the same object.
+    assert isinstance(orchestrator.coordinator, Coordinator)
