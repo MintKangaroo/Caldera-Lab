@@ -11,6 +11,10 @@ EXPECTED = {
     "collect-system-info",
     "collect-process-list",
     "collect-workspace-files",
+    "collect-account-list",
+    "collect-container-context",
+    "collect-network-interfaces",
+    "collect-installed-packages",
 }
 
 
@@ -37,6 +41,20 @@ def main(path: Path) -> int:
 
     if not any(r["event"] == "reward.scored" for r in records):
         failures.append("no reward was scored")
+
+    # The sandbox claims to have no network. /proc/net/dev is the evidence:
+    # anything beyond loopback means the isolation regressed.
+    interfaces = [
+        r for r in completed if r["details"]["ability_id"] == "collect-network-interfaces"
+    ]
+    for record in interfaces:
+        names = [
+            line.split(":")[0].strip()
+            for line in record["details"]["stdout"].splitlines()
+            if ":" in line and not line.strip().startswith(("Inter-", "face"))
+        ]
+        if names != ["lo"]:
+            failures.append(f"sandbox exposed interfaces beyond loopback: {names}")
 
     for failure in failures:
         print(f"::error::{failure}")

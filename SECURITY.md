@@ -55,6 +55,17 @@ of its risk level and network requirement, a negative test, and a Docker
 execution check in CI. Anything that writes, persists, or reaches the network
 is out of scope for this repository.
 
+The scope is enforced, not merely stated. The test suite rejects a catalog
+entry whose command writes, reaches the network, spawns a shell, contains a
+shell metacharacter, or names a credential store (`/etc/shadow`, `.ssh`,
+`id_rsa`, `.aws`, `.netrc`, `/proc/kcore`). Techniques must be unique so
+coverage reporting stays meaningful, and the catalog must fit the default step
+budget so a full sweep is not silently truncated.
+
+CI additionally reads `/proc/net/dev` from inside the sandbox and fails if any
+interface beyond loopback appears, so the no-network claim is checked against
+the running container rather than trusted.
+
 ## Reporting a vulnerability
 
 Open a GitHub issue for problems in this harness. Please do not include

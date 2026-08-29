@@ -30,7 +30,9 @@ policy, Docker 경계, 감사 로그, 테스트를 함께 갱신해야 합니다
 - 감사 가능성: 계획, 승인, 실행 결과를 `run_id`가 붙은 JSONL 이벤트 로그에 append합니다.
 - 에이전트 통신: loopback 전용 beacon 프로토콜. 명령이 아닌 ability ID만 전달하며,
   다중 에이전트 동시 접속과 beacon 이벤트 감사 로그를 지원합니다.
-- 기본 능력은 `id`, `uname`, `ps`, read-only로 마운트한 `/workspace` 목록 수집뿐입니다.
+- 기본 능력은 8개의 read-only discovery뿐입니다: `id`, `uname`, `ps`, `/workspace` 목록,
+  `/etc/passwd`, `/proc/self/cgroup`, `/proc/net/dev`, `apk info`. 각 항목은 서로 다른
+  ATT&CK technique에 대응하므로 커버리지 보고가 의미를 갖습니다.
 
 ```mermaid
 flowchart LR
@@ -155,6 +157,8 @@ catalog의 `volatile_patterns`로 **능력별로 선언**해 해결합니다.
 - 컨테이너는 read-only rootfs와 capability 제거로 실행됩니다.
 - beacon 서버는 loopback에만 바인드하고, 토큰 없는 요청과 catalog 밖 ability를 거부합니다.
 - 이 저장소는 인터넷 스캔, 자격 증명 수집, 지속성 설치, 임의 파일 변경 능력을 제공하지 않습니다.
+  이는 테스트로 강제됩니다: 쓰기·네트워크·셸 명령, shell 메타문자, 자격 증명 경로
+  (`/etc/shadow`, `.ssh`, `id_rsa`, `.aws`, `/proc/kcore` 등)를 catalog에서 거부합니다.
 - 반드시 소유하거나 명시적으로 허가된 격리 랩에서만 사용하세요.
 
 ## 품질
@@ -164,10 +168,11 @@ make check
 ```
 
 CI는 두 개의 잡으로 구성됩니다. `quality`는 Python 3.10/3.12에서 lint와 테스트를 돌리고,
-`docker-smoke`는 이미지를 빌드해 4개 능력을 실제 컨테이너에서 실행한 뒤
+`docker-smoke`는 이미지를 빌드해 8개 능력을 전부 실제 컨테이너에서 실행한 뒤
 `.github/scripts/check_smoke.py`로 감사 로그를 검증합니다. 이 검사는 종료 코드만 보지 않고,
-`/workspace`가 실제로 마운트되어 파일이 나열되었는지와 모든 실행의 `isolation`이 `docker`인지를
-확인합니다. 별도로 `/workspace` 쓰기가 거부되는지도 검사합니다.
+`/workspace`가 실제로 마운트되어 파일이 나열되었는지, 모든 실행의 `isolation`이 `docker`인지,
+그리고 `/proc/net/dev`에 loopback 외의 인터페이스가 없는지를 확인합니다 — 네트워크 격리를
+주장이 아니라 증거로 검증합니다. 별도로 `/workspace` 쓰기가 거부되는지도 검사합니다.
 
 현재 테스트는 catalog 검증, planner fallback, LLM이 catalog 밖 ID를 반환할 때의 거부,
 CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 감사 로그 append와 `run_id`
@@ -179,15 +184,16 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 78 passed
+pytest             -> 84 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
 Reward             -> 최초 실행 1.24, 동일 능력 반복 시 0.24 (4개 능력 모두 정보 이득 0.0)
-Docker smoke       -> 4 executions, 0 failures (digest 고정 이미지 기준)
+Docker smoke       -> 8 executions, 0 failures, loopback 외 인터페이스 없음
 Beacon             -> 127.0.0.1 전용 바인드, 4/4 실행 (컨테이너는 --network none 유지)
 Multi-agent        -> 3 에이전트 동시 실행, 중복 배정 0건
-Coordinator        -> beacon 실행에서 plan/RL/reward 이벤트 생성, Q table 4 entries 학습
+Coordinator        -> beacon 실행에서 plan/RL/reward 이벤트 생성, Q table 학습 확인
+ATT&CK coverage    -> 8 techniques (T1016/T1033/T1057/T1082/T1083/T1087.001/T1518/T1613)
 GitHub Actions     -> success (quality 3.10/3.12 + docker-smoke)
 ```
 

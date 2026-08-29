@@ -37,6 +37,10 @@ def test_catalog_is_allowlisted(catalog: AbilityCatalog) -> None:
         "collect-system-info",
         "collect-process-list",
         "collect-workspace-files",
+        "collect-account-list",
+        "collect-container-context",
+        "collect-network-interfaces",
+        "collect-installed-packages",
     )
     with pytest.raises(KeyError):
         catalog.get("arbitrary-shell-command")
@@ -233,12 +237,12 @@ def test_state_is_bounded_and_revisited(catalog: AbilityCatalog) -> None:
     forward = policy.state(("collect-host-identity:succeeded:0", "collect-system-info:succeeded:0"))
     reverse = policy.state(("collect-system-info:succeeded:0", "collect-host-identity:succeeded:0"))
     assert forward == reverse
-    assert forward == "1100|succeeded"
+    assert forward == "11000000|succeeded"
     # A failure is a different state than a success over the same set.
     assert policy.state(("collect-host-identity:failed:1",)) != policy.state(
         ("collect-host-identity:succeeded:0",)
     )
-    assert policy.state(()) == "0000|none"
+    assert policy.state(()) == "0" * len(catalog.ids()) + "|none"
 
 
 def test_learning_reaches_entries_it_has_already_written(catalog: AbilityCatalog) -> None:
@@ -293,7 +297,7 @@ def test_q_table_rejects_actions_outside_the_catalog(
             {
                 "version": 1,
                 "catalog": policy.fingerprint(),
-                "entries": [{"state": "0000|none", "action": "rm -rf /", "value": 9.0}],
+                "entries": [{"state": "0" * 8 + "|none", "action": "rm -rf /", "value": 9.0}],
             }
         ),
         encoding="utf-8",
@@ -611,8 +615,11 @@ def test_report_maps_executions_onto_attack_techniques(
     catalog: AbilityCatalog, tmp_path: Path
 ) -> None:
     rows = coverage(catalog, summarize(load_events(_run_log(catalog, tmp_path))))
-    assert {row["technique"] for row in rows} == {"T1033", "T1082", "T1057", "T1083"}
-    assert all(row["successes"] == 1 for row in rows)
+    assert {row["technique"] for row in rows} == {
+        "T1033", "T1082", "T1057", "T1083", "T1087.001", "T1613", "T1016", "T1518"
+    }
+    executed = [row for row in rows if row["successes"]]
+    assert len(executed) == 4
 
 
 def test_report_flags_techniques_that_never_ran(catalog: AbilityCatalog, tmp_path: Path) -> None:
@@ -624,8 +631,8 @@ def test_report_flags_techniques_that_never_ran(catalog: AbilityCatalog, tmp_pat
     ]
     log.write_text("\n".join(kept) + "\n", encoding="utf-8")
     rows = coverage(catalog, summarize(load_events(log)))
-    uncovered = [row for row in rows if row["successes"] == 0]
-    assert [row["technique"] for row in uncovered] == ["T1057"]
+    uncovered = {row["technique"] for row in rows if row["successes"] == 0}
+    assert "T1057" in uncovered
     assert "!" in render(catalog, summarize(load_events(log)))
 
 
@@ -672,7 +679,7 @@ def test_report_cli_emits_json(catalog: AbilityCatalog, tmp_path: Path, capsys) 
     cli.main(["report", "--log", str(log), "--json"])
     payload = json.loads(capsys.readouterr().out)
     assert len(payload["runs"]) == 1
-    assert len(payload["coverage"]) == 4
+    assert len(payload["coverage"]) == len(catalog.ids())
 
 
 def test_report_json_keeps_counter_keys_intact(catalog: AbilityCatalog, tmp_path: Path) -> None:
@@ -934,7 +941,8 @@ def test_report_summarises_a_beacon_run(catalog: AbilityCatalog, tmp_path: Path,
     rendered = render(catalog, runs)
     assert "agents: 2 beaconing, 4 ability tasks dispatched" in rendered
     # Coverage is derived from beacon results as well as orchestrator runs.
-    assert all(row["successes"] == 1 for row in coverage(catalog, runs))
+    covered = [row for row in coverage(catalog, runs) if row["successes"]]
+    assert len(covered) == 4
 
 
 def test_beacon_run_goes_through_the_planner_and_rl(tmp_path: Path, capsys) -> None:
@@ -1006,3 +1014,55 @@ def test_orchestrator_and_beacon_share_one_coordinator_contract(
     assert sequential.count("reward.scored") == 4
     # Same event vocabulary as the beacon path, produced by the same object.
     assert isinstance(orchestrator.coordinator, Coordinator)
+
+
+def test_every_ability_is_read_only_discovery(catalog: AbilityCatalog) -> None:
+    """The catalog must stay within the scope SECURITY.md declares."""
+    writing = {"rm", "mv", "cp", "tee", "dd", "chmod", "chown", "ln", "mkdir", "touch", "truncate"}
+    networking = {"curl", "wget", "nc", "netcat", "ssh", "scp", "ping", "nmap", "telnet"}
+    shells = {"sh", "bash", "ash", "zsh", "python", "python3", "perl", "eval"}
+    for ability in catalog.all():
+        binary = ability.command[0]
+        assert binary not in writing, f"{ability.id} runs a writing command"
+        assert binary not in networking, f"{ability.id} reaches the network"
+        assert binary not in shells, f"{ability.id} spawns a shell"
+        assert ability.tactic == "discovery"
+        assert ability.risk == "low"
+        assert not ability.requires_network
+        # A shell string smuggled into an argv array would defeat the allowlist.
+        assert not any(char in part for part in ability.command for char in "|;&$`><")
+
+
+def test_no_ability_reads_a_credential_store(catalog: AbilityCatalog) -> None:
+    forbidden = ("/etc/shadow", "/etc/gshadow", ".ssh", "id_rsa", ".aws", ".netrc", "/proc/kcore")
+    for ability in catalog.all():
+        joined = " ".join(ability.command)
+        for needle in forbidden:
+            assert needle not in joined, f"{ability.id} touches {needle}"
+
+
+def test_techniques_are_unique_so_coverage_is_meaningful(catalog: AbilityCatalog) -> None:
+    techniques = [ability.technique for ability in catalog.all()]
+    assert len(techniques) == len(set(techniques))
+
+
+def test_every_ability_id_is_unique_and_stable(catalog: AbilityCatalog) -> None:
+    # AbilityCatalog stores by id, so a duplicate would silently drop an entry.
+    raw = json.loads((ROOT / "catalog" / "abilities.json").read_text(encoding="utf-8"))
+    ids = [entry["id"] for entry in raw]
+    assert len(ids) == len(set(ids)) == len(catalog.ids())
+
+
+def test_catalog_fits_the_default_step_budget(catalog: AbilityCatalog) -> None:
+    # Otherwise a full sweep silently truncates and coverage looks incomplete.
+    assert len(catalog.ids()) <= LabPolicy().max_steps
+
+
+def test_network_interface_patterns_mask_counters(catalog: AbilityCatalog) -> None:
+    ability = catalog.get("collect-network-interfaces")
+    sample = "    lo:  1024      8    0    0    0     0          0         0"
+    later = "    lo:  9999     42    0    0    0     0          0         0"
+    facts = RewardModel.facts(sample, ability.volatile_patterns)
+    assert facts == RewardModel.facts(later, ability.volatile_patterns)
+    # The interface name survives; only the counters are masked.
+    assert "lo:" in facts[0]

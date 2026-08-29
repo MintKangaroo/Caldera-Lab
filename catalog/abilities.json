@@ -56,5 +56,56 @@
     ],
     "description": "List only the explicitly mounted lab workspace.",
     "risk": "low"
+  },
+  {
+    "id": "collect-account-list",
+    "name": "Collect local accounts",
+    "tactic": "discovery",
+    "technique": "T1087.001",
+    "command": [
+      "cat",
+      "/etc/passwd"
+    ],
+    "description": "List local account entries. /etc/passwd holds no secrets; shadow is not readable by the unprivileged agent.",
+    "risk": "low"
+  },
+  {
+    "id": "collect-container-context",
+    "name": "Collect container context",
+    "tactic": "discovery",
+    "technique": "T1613",
+    "command": [
+      "cat",
+      "/proc/self/cgroup"
+    ],
+    "description": "Determine whether the agent is running inside a container.",
+    "risk": "low"
+  },
+  {
+    "id": "collect-network-interfaces",
+    "name": "Collect network interfaces",
+    "tactic": "discovery",
+    "technique": "T1016",
+    "command": [
+      "cat",
+      "/proc/net/dev"
+    ],
+    "description": "Read interface statistics. In the default lab this shows only loopback, evidencing that the sandbox has no network.",
+    "risk": "low",
+    "volatile_patterns": [
+      "\\b\\d+\\b"
+    ]
+  },
+  {
+    "id": "collect-installed-packages",
+    "name": "Collect installed packages",
+    "tactic": "discovery",
+    "technique": "T1518",
+    "command": [
+      "apk",
+      "info"
+    ],
+    "description": "List packages present in the isolated image.",
+    "risk": "low"
   }
 ]

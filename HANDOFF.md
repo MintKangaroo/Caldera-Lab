@@ -157,7 +157,14 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
   coordinator 이벤트가 없는 로그에서만 beacon 결과를 폴백으로 씁니다.
 - 알려진 특성: 동시 dispatch에서는 RL이 배정 시점 state를 보므로 동시에 나간 능력들이 같은
   state를 공유합니다. 학습 관찰 시 `--agents 1` 권장. README에 문서화함.
-- 테스트 6개 -> 78개.
+- catalog을 4개 -> 8개 능력으로 확장했습니다. 모두 read-only discovery이며 technique이
+  겹치지 않습니다: T1087.001(`/etc/passwd`), T1613(`/proc/self/cgroup`),
+  T1016(`/proc/net/dev`), T1518(`apk info`). 8개 전부 실제 컨테이너에서 성공 확인.
+- SECURITY.md의 범위를 테스트로 강제했습니다: 쓰기/네트워크/셸 명령, shell 메타문자,
+  자격 증명 경로를 거부하고, technique 고유성과 기본 step 예산 적합성을 검사합니다.
+- CI 스모크가 `/proc/net/dev`를 읽어 loopback 외 인터페이스가 있으면 실패합니다.
+  네트워크 격리를 주장이 아니라 증거로 검증합니다(eth0 노출 시뮬레이션으로 검증함).
+- 테스트 6개 -> 84개.
 
 ## 6. 다음 세션 우선순위
 
@@ -166,8 +173,8 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
 2. ~~**LLM planner 계약 강화**~~: 완료(5-1 참고). 실제 API 키로의 end-to-end 검증은 아직
    수행하지 않았습니다. 스텁 기반 테스트만 있습니다.
 3. ~~**RL 학습 지속성**~~, ~~**보상 설계**~~, ~~**변동성 출력 정규화**~~: 완료(5-1 참고).
-4. **능력 catalog 확장**: 새로운 low-risk discovery 능력부터 추가하고 각 항목에 negative test,
-   timeout test, Docker 실행 검증을 함께 추가합니다.
+4. ~~**능력 catalog 확장**~~: 8개까지 확장 완료(5-1 참고). 더 늘리려면 `LabPolicy.max_steps`
+   기본값(8)도 함께 올려야 합니다. timeout test는 아직 없습니다.
 5. **대시보드 연동**: 현재 대시보드는 `make test`만 제공합니다. `caldera-lab report --json`
    출력을 그대로 쓸 수 있으므로 이를 대시보드에 노출할지 검토합니다.
 6. ~~**CI Docker smoke test**~~: 완료. GitHub Actions에서 통과 확인함(run 33231936058,

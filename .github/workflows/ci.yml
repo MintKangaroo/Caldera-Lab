@@ -44,7 +44,7 @@ jobs:
           mkdir -p smoke-workspace
           echo "ci-sample" > smoke-workspace/sample.txt
           python -m caldera_lab run \
-            --executor docker --planner rules --steps 4 \
+            --executor docker --planner rules --steps 8 \
             --workspace "$PWD/smoke-workspace" \
             --no-q-table --log smoke.jsonl
       - name: Assert every ability succeeded in the container
