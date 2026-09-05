@@ -40,7 +40,7 @@ from caldera_lab.report import (
     technique_coverage,
 )
 from caldera_lab.reward import RewardModel
-from caldera_lab.rl import Q_TABLE_VERSION, QPolicy
+from caldera_lab.rl import FACTS, ISSUED, Q_TABLE_VERSION, QPolicy
 
 ROOT = Path(__file__).parents[1]
 
@@ -254,7 +254,7 @@ def test_audit_log_appends_across_runs(catalog: AbilityCatalog, tmp_path: Path) 
 
 
 def test_state_is_bounded_and_revisited(catalog: AbilityCatalog) -> None:
-    policy = QPolicy(catalog)
+    policy = QPolicy(catalog, state_mode=ISSUED)
     # Order of arrival must not matter: the same completed set is the same state.
     forward = policy.state(("collect-host-identity:succeeded:0", "collect-system-info:succeeded:0"))
     reverse = policy.state(("collect-system-info:succeeded:0", "collect-host-identity:succeeded:0"))
@@ -265,6 +265,35 @@ def test_state_is_bounded_and_revisited(catalog: AbilityCatalog) -> None:
         ("collect-host-identity:succeeded:0",)
     )
     assert policy.state(()) == "0" * len(catalog.ids()) + "|clean"
+
+
+def test_the_default_state_records_what_is_known_not_what_was_run(
+    catalog: AbilityCatalog,
+) -> None:
+    """Two surface reads are interchangeable for the next decision. Recording
+    which one happened splits one decision across 2^len(catalog) states that
+    each have to be learned on their own."""
+    policy = QPolicy(catalog)
+    assert policy.state_mode == FACTS
+    one = policy.state(("collect-host-identity:succeeded:0",))
+    other = policy.state(("collect-system-info:succeeded:0",))
+    assert one == other == "000|1|clean"
+    # A discovery is not interchangeable: it changes what can be run next.
+    assert policy.state(("collect-process-list:succeeded:0",)) != one
+    assert policy.state(()) == "000|0|clean"
+    # Budget spent is part of the state, because the horizon changes the choice.
+    assert policy.state(
+        ("collect-host-identity:succeeded:0", "collect-system-info:succeeded:0")
+    ) != policy.state(("collect-host-identity:succeeded:0",))
+
+
+def test_the_state_layout_is_part_of_what_a_saved_table_applies_to(
+    catalog: AbilityCatalog, tmp_path: Path
+) -> None:
+    path = tmp_path / "q.json"
+    QPolicy(catalog, state_mode=ISSUED).save(path)
+    assert QPolicy(catalog, state_mode=FACTS).load(path) is False
+    assert QPolicy(catalog, state_mode=ISSUED).load(path) is True
 
 
 def test_learning_reaches_entries_it_has_already_written(catalog: AbilityCatalog) -> None:
@@ -1415,17 +1444,22 @@ def test_sequential_state_sequence_is_unchanged(catalog: AbilityCatalog) -> None
     # single-agent run must produce exactly the states it produced before.
     orchestrator = Orchestrator(catalog, DryRunExecutor(), planner_mode="rules")
     orchestrator.run(4)
-    masks = sorted(key[0] for key in orchestrator.rl.q)
-    assert masks[0] == "0" * len(catalog.ids()) + "|clean"
-    assert all(mask.endswith("|clean") for mask in masks)
-    assert len(set(masks)) == 4
+    states = sorted(key[0] for key in orchestrator.rl.q)
+    assert states[0] == "000|0|clean"
+    assert all(state.endswith("|clean") for state in states)
+    assert len(set(states)) == 4
 
 
 def test_state_from_matches_the_observation_derived_state(catalog: AbilityCatalog) -> None:
     policy = QPolicy(catalog)
     observations = ("collect-host-identity:succeeded:0", "collect-system-info:succeeded:0")
+    committed = {"collect-host-identity", "collect-system-info"}
     assert policy.state(observations) == policy.state_from(
-        {"collect-host-identity", "collect-system-info"}, "clean"
+        committed, "clean", traits=frozenset(), step=len(committed)
+    )
+    produced = ("collect-process-list:succeeded:0",)
+    assert policy.state(produced) == policy.state_from(
+        {"collect-process-list"}, "clean", traits={"host.process.pid"}, step=1
     )
 
 

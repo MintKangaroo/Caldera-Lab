@@ -15,6 +15,10 @@ CLEAN = "clean"
 DEGRADED = "degraded"
 OUTCOMES = frozenset({CLEAN, DEGRADED})
 
+ISSUED = "issued"
+FACTS = "facts"
+STATE_MODES = frozenset({ISSUED, FACTS})
+
 
 class QPolicy:
     """Small tabular policy used to rank safe abilities; it never creates commands."""
@@ -27,6 +31,7 @@ class QPolicy:
         alpha: float = 0.2,
         gamma: float = 0.85,
         optimism: float = 2.0,
+        state_mode: str = FACTS,
     ) -> None:
         self.catalog = catalog
         self.random = random.Random(seed)
@@ -39,9 +44,19 @@ class QPolicy:
         # order could never be found. An unseen pair is therefore worth more
         # than a measured one until it has been measured.
         self.optimism = optimism
+        if state_mode not in STATE_MODES:
+            raise ValueError(f"Unknown state mode: {state_mode!r}")
+        self.state_mode = state_mode
         self.q: dict[tuple[str, str], float] = {}
 
-    def state_from(self, committed: frozenset[str] | set[str], outcome: str) -> str:
+    def state_from(
+        self,
+        committed: frozenset[str] | set[str],
+        outcome: str,
+        *,
+        traits: frozenset[str] | set[str] = frozenset(),
+        step: int = 0,
+    ) -> str:
         """Build a state from the abilities already committed and how the run is going.
 
         "Committed" means issued, not finished. Under concurrent dispatch a
@@ -58,6 +73,15 @@ class QPolicy:
         """
         if outcome not in OUTCOMES:
             raise ValueError(f"Unknown outcome: {outcome!r}")
+        if self.state_mode == FACTS:
+            # What is known and how much budget is left is what a choice turns
+            # on. Which particular surface reads are done is not: they are
+            # interchangeable, and recording them splits one decision across
+            # 2^len(catalog) states that each have to be learned separately.
+            known = "".join(
+                "1" if trait in traits else "0" for trait in sorted(self.catalog.traits())
+            )
+            return f"{known}|{step}|{outcome}"
         mask = "".join("1" if item in committed else "0" for item in self.catalog.ids())
         return f"{mask}|{outcome}"
 
@@ -70,15 +94,18 @@ class QPolicy:
         has failed, which bounds the space at 2^len(catalog) * 2.
         """
         completed: set[str] = set()
+        traits: set[str] = set()
         outcome = CLEAN
         for observation in observations:
             ability_id, _, remainder = observation.partition(":")
             status, _, _ = remainder.partition(":")
             if ability_id in self.catalog.ids():
                 completed.add(ability_id)
+                for producer in self.catalog.get(ability_id).produces:
+                    traits.add(producer.trait)
             if status and status not in SUCCESS_STATUSES:
                 outcome = DEGRADED
-        return self.state_from(completed, outcome)
+        return self.state_from(completed, outcome, traits=traits, step=len(completed))
 
     def choose(self, state: str, candidates: tuple[str, ...]) -> str:
         if not candidates:
@@ -114,8 +141,12 @@ class QPolicy:
         self.q[(state, action)] = old + self.alpha * (reward + self.gamma * future - old)
 
     def fingerprint(self) -> str:
-        """Ties a saved table to the catalog it was learned against."""
-        return "|".join(self.catalog.ids())
+        """Ties a saved table to the catalog and the state layout it used.
+
+        A table learned under one state layout means something else under
+        another, so the mode is part of what a table is compatible with.
+        """
+        return f"{self.state_mode}::" + "|".join(self.catalog.ids())
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

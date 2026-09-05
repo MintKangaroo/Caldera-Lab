@@ -62,6 +62,7 @@ class Coordinator:
         reward_model: RewardModel | None = None,
         max_steps: int | None = None,
         agent_policies: dict[str, LabPolicy] | None = None,
+        state_mode: str | None = None,
     ) -> None:
         self.catalog = catalog
         self.policy = policy or LabPolicy()
@@ -71,7 +72,11 @@ class Coordinator:
         self.planner = (
             LLMPlanner(catalog) if planner_mode in {"llm", "hybrid"} else RulePlanner(catalog)
         )
-        self.rl = QPolicy(catalog, seed=seed)
+        self.rl = (
+            QPolicy(catalog, seed=seed)
+            if state_mode is None
+            else QPolicy(catalog, seed=seed, state_mode=state_mode)
+        )
         self.reward_model = reward_model or RewardModel()
         self.run_id = uuid.uuid4().hex[:12]
         self.q_table_path = q_table_path
@@ -145,6 +150,15 @@ class Coordinator:
                 },
             )
 
+    def _state(self) -> str:
+        """The state the policy sees. Callers hold the lock."""
+        return self.rl.state_from(
+            frozenset(self._used),
+            self._outcome,
+            traits=self.facts.traits(),
+            step=self._issued,
+        )
+
     def _available(self, ability_id: str) -> bool:
         """Whether the facts discovered so far unlock this ability."""
         return self.facts.satisfies(self.catalog.get(ability_id))
@@ -198,7 +212,7 @@ class Coordinator:
             index = self._issued
             # Built from what has been issued, not what has finished, so two
             # concurrent hand-outs do not collapse onto the same state.
-            state = self.rl.state_from(frozenset(self._used), self._outcome)
+            state = self._state()
             policy = self.policy_for(agent_id)
             # Only offer this agent what its own policy permits, then validate;
             # otherwise one restricted agent would stall the whole run.
@@ -255,10 +269,7 @@ class Coordinator:
             key = f"{agent_id}:{result.ability_id}"
             state, ability_id = self._pending.pop(
                 key,
-                (
-                    self.rl.state_from(frozenset(self._used), self._outcome),
-                    result.ability_id,
-                ),
+                (self._state(), result.ability_id),
             )
             ability = self.catalog.get(ability_id)
             self._emit("ability.completed", {"agent_id": agent_id, **asdict(result)})
@@ -299,7 +310,7 @@ class Coordinator:
             )
             if result.status not in SUCCESS_STATUSES:
                 self._outcome = DEGRADED
-            next_state = self.rl.state_from(frozenset(self._used), self._outcome)
+            next_state = self._state()
             self.rl.update(
                 state,
                 ability_id,

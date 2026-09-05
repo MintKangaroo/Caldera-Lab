@@ -306,10 +306,43 @@ collect-network-interfaces  collect-container-context  collect-workspace-files
 학습했습니다. 최적과의 차이는 앞의 표면 능력 두 개(`collect-host-identity`,
 `collect-system-info`)를 먼저 실행하는 것뿐입니다.
 
-여전히 최적이 아니고 수렴도 느립니다(25000 에피소드에서도 상승 중). 시작 상태에서 두 선택지의
-가치 차이가 작고, state가 어떤 fact를 아는지가 아니라 어떤 능력을 배정했는지만 담아 4096개
-상태를 훑기에는 탐험이 얇습니다. 측정 장치는 갖춰져 있으므로 상태 표현이나 탐험 전략을
-바꿔가며 비교할 수 있습니다.
+### 상태 표현
+
+여기서 정체의 원인이 드러납니다. state가 **어떤 능력을 배정했는지**를 담고 있었습니다. 그런데
+표면 읽기 두 개는 다음 결정에 대해 서로 구분되지 않습니다 — 어느 쪽을 실행했든 다음에 무엇을
+할 수 있는지는 같습니다. 그걸 기록하면 하나의 결정이 2^11개 상태로 쪼개지고, 각각을 따로
+학습해야 합니다.
+
+결정이 실제로 의존하는 것은 **무엇을 알고 있고 예산이 얼마나 남았는가**입니다.
+
+```text
+issued  능력 배정 마스크 + 결과      2^11 x 2 = 4096 가능
+facts   알려진 trait + 단계 + 결과   2^3 x 12 x 2 = 192 가능
+```
+
+두 표현을 같은 harness로 비교했습니다(DP 최적 대비 학습 여지의 몇 %).
+
+```text
+  에피소드    issued     facts
+       200      0.0%     32.5%
+       800     16.0%     52.2%
+      2500     40.4%     86.9%
+      6000     48.8%     86.9%
+     12000     52.2%    100.0%   <- 최적
+  방문 상태      360        55
+```
+
+fact 기반은 12000 에피소드에서 **정확히 최적 순서**에 도달합니다.
+
+```text
+collect-installed-packages -> inspect-package-contents
+collect-account-list       -> inspect-account-identity
+collect-process-list       -> inspect-process-status
+그다음 표면 능력 5개
+```
+
+기본값은 `facts`입니다. `issued`도 남겨두어 비교할 수 있으며, 두 표현의 key는 의미가 다르므로
+저장된 table의 지문에 상태 모드가 포함되어 서로 로드되지 않습니다.
 
 ### 변동성 출력 정규화
 
@@ -397,7 +430,7 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 158 passed
+pytest             -> 161 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
@@ -412,8 +445,8 @@ Fact 추출          -> pid 1개, package 20개, account 17개 (실제 컨테이
 Timeout            -> timed-out 상태, 컨테이너 누수 0건 (수정 전: 컨테이너 계속 실행)
 RL credit          -> 4 에이전트 동시 실행 시 고유 state 2 -> 8 (순차와 동일)
 RL 행동 공간       -> 잠금 해제된 작업이 후보에서 누락되던 문제 수정 (2/6 -> 6/6)
-RL 순서 학습       -> 깊이 보상 후 학습 여지의 0% -> 56.1% (25000 에피소드, DP 최적 대비)
-                      생산자->후속 짝짓기 3쌍 모두 학습됨
+RL 순서 학습       -> 상태를 fact 기반으로 바꾼 뒤 12000 에피소드에서 DP 최적 100% 도달
+                      (배정 마스크 기반은 같은 지점에서 52.2%, 방문 상태 360 -> 55)
 최적 순서          -> 2^11 부분집합 DP로 정확히 계산, 최악 순서 = catalog 순서
 Q table 전이       -> 순차 학습 table의 동시 실행 적중률 38% -> 75%
 Agent starvation   -> 98% -> 0% (200회 시행), 교착 없음
