@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .catalog import AbilityCatalog
+from .clock import now
 from .executor import SUCCESS_STATUSES
 
 
@@ -213,3 +214,67 @@ def render(catalog: AbilityCatalog, runs: dict[str, RunSummary]) -> str:
 
 def _counter_line(counter: Counter[str]) -> str:
     return ", ".join(f"{key}={value}" for key, value in sorted(counter.items()))
+
+
+STATUS_SCHEMA = "lab-status/1"
+
+
+def status_document(catalog: AbilityCatalog, runs: dict[str, RunSummary]) -> dict[str, object]:
+    """Summarise runs as the generic status contract a control room can render.
+
+    The consumer is not expected to know anything about this lab: it renders
+    label/value pairs. Everything domain-specific -- ATT&CK coverage, planner
+    sources, isolation -- is resolved here and flattened into strings.
+    """
+    rows = coverage(catalog, runs)
+    covered = sum(1 for row in rows if row["successes"])
+    executions = sum(summary.executions for summary in runs.values())
+    failures = sum(sum(summary.failed.values()) for summary in runs.values())
+
+    isolations: Counter[str] = Counter()
+    sources: Counter[str] = Counter()
+    fallbacks: Counter[str] = Counter()
+    gain = 0.0
+    for summary in runs.values():
+        isolations.update(summary.isolations)
+        sources.update(summary.planner_sources)
+        fallbacks.update(summary.fallback_reasons)
+        gain += summary.information_gain
+
+    if not runs:
+        state, headline = "unknown", "no runs recorded"
+    elif failures or covered < len(rows):
+        state = "warn"
+        headline = f"{covered}/{len(rows)} techniques covered"
+        if failures:
+            headline += f", {failures} failed"
+    else:
+        state = "ok"
+        headline = f"{covered}/{len(rows)} techniques covered"
+
+    metrics = [
+        {"label": "runs", "value": str(len(runs))},
+        {"label": "executions", "value": str(executions)},
+        {"label": "failed", "value": str(failures)},
+        {"label": "ATT&CK coverage", "value": f"{covered}/{len(rows)}"},
+        {"label": "isolation", "value": _counter_line(isolations) or "none"},
+        {"label": "planner", "value": _counter_line(sources) or "none"},
+        {"label": "information gain", "value": f"{gain:.2f}"},
+    ]
+    if fallbacks:
+        metrics.append({"label": "planner fallbacks", "value": _counter_line(fallbacks)})
+
+    latest = max((summary.ended for summary in runs.values()), default="")
+    return {
+        "schema": STATUS_SCHEMA,
+        "generated_at": now(),
+        "state": state,
+        "headline": headline,
+        "last_run_at": latest,
+        "metrics": metrics,
+    }
+
+
+def write_status(path: Path, document: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

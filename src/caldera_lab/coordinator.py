@@ -3,19 +3,15 @@ from __future__ import annotations
 import threading
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 from .catalog import AbilityCatalog
+from .clock import now
 from .executor import ExecutionResult
 from .planner import LLMPlanner, Plan, RulePlanner
 from .policy import LabPolicy
 from .reward import RewardModel
 from .rl import QPolicy
-
-
-def now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 @dataclass(frozen=True)

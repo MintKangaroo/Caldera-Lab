@@ -13,7 +13,7 @@ from .coordinator import Coordinator
 from .executor import DockerLabExecutor, DryRunExecutor, ExecutionResult, LocalLabExecutor
 from .orchestrator import Event, Orchestrator, now, write_events
 from .policy import LabPolicy
-from .report import coverage, load_events, render, summarize
+from .report import coverage, load_events, render, status_document, summarize, write_status
 
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = ROOT / "catalog" / "abilities.json"
@@ -44,7 +44,26 @@ def _report(
             )
         )
         return
+    if args.status:
+        write_status(args.status, status_document(catalog, runs))
+        print(f"status -> {args.status}")
+        return
     print(render(catalog, runs))
+
+
+def _publish_status(catalog: AbilityCatalog, log_path: Path, status_path: Path | None) -> None:
+    """Refresh the status file a control room polls, from the whole audit log."""
+    if status_path is None or not log_path.exists():
+        return
+    runs = summarize(load_events(log_path))
+    write_status(status_path, status_document(catalog, runs))
+    print(f"status -> {status_path}")
+
+
+def _status_path(args: argparse.Namespace) -> Path | None:
+    if getattr(args, "no_status", False):
+        return None
+    return args.status or args.log.parent / "status.json"
 
 
 class _EventSink:
@@ -184,6 +203,7 @@ def _serve(
         f"run {coordinator.run_id}: {len(events)} coordinator + "
         f"{len(sink.events)} beacon events -> {args.log}"
     )
+    _publish_status(catalog, args.log, _status_path(args))
     if failures:
         parser.exit(1, f"{len(failures)} agent(s) failed: {failures[0]}\n")
 
@@ -196,6 +216,10 @@ def main(argv: list[str] | None = None) -> None:
     run.add_argument("--planner", choices=("rules", "llm", "hybrid"), default="hybrid")
     run.add_argument("--steps", type=positive_int, default=4)
     run.add_argument("--log", type=Path, default=Path(".runtime/run.jsonl"))
+    run.add_argument(
+        "--status", type=Path, default=None, help="status file (default: next to --log)"
+    )
+    run.add_argument("--no-status", action="store_true")
     run.add_argument(
         "--q-table",
         type=Path,
@@ -225,6 +249,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     serve.add_argument("--workspace", type=Path, default=None)
     serve.add_argument("--log", type=Path, default=Path(".runtime/run.jsonl"))
+    serve.add_argument(
+        "--status", type=Path, default=None, help="status file (default: next to --log)"
+    )
+    serve.add_argument("--no-status", action="store_true")
     serve.add_argument("--q-table", type=Path, default=Path(".runtime/q_table.json"))
     serve.add_argument("--no-q-table", action="store_true")
     serve.add_argument(
@@ -243,6 +271,13 @@ def main(argv: list[str] | None = None) -> None:
     report.add_argument("--log", type=Path, default=Path(".runtime/run.jsonl"))
     report.add_argument(
         "--json", action="store_true", help="emit machine-readable output instead of a table"
+    )
+    report.add_argument(
+        "--status",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="write the lab-status document a control room polls, instead of printing",
     )
 
     args = parser.parse_args(argv)
@@ -265,3 +300,4 @@ def main(argv: list[str] | None = None) -> None:
     events = orchestrator.run(args.steps, args.log)
     for event in events:
         print(f"{event.timestamp} {event.event} {event.details}")
+    _publish_status(catalog, args.log, _status_path(args))

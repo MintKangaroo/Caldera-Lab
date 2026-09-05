@@ -27,7 +27,14 @@ from caldera_lab.executor import (
 from caldera_lab.orchestrator import Orchestrator
 from caldera_lab.planner import LLMPlanner, RulePlanner
 from caldera_lab.policy import LabPolicy
-from caldera_lab.report import coverage, load_events, render, summarize
+from caldera_lab.report import (
+    STATUS_SCHEMA,
+    coverage,
+    load_events,
+    render,
+    status_document,
+    summarize,
+)
 from caldera_lab.reward import RewardModel
 from caldera_lab.rl import QPolicy
 
@@ -1391,3 +1398,98 @@ def test_state_from_matches_the_observation_derived_state(catalog: AbilityCatalo
     assert policy.state(observations) == policy.state_from(
         {"collect-host-identity", "collect-system-info"}, "succeeded"
     )
+
+
+def _completed(ability_id: str, status: str = "succeeded", run_id: str = "r1") -> str:
+    return json.dumps(
+        {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "run_id": run_id,
+            "event": "ability.completed",
+            "details": {
+                "ability_id": ability_id,
+                "status": status,
+                "isolation": "docker",
+                "duration_seconds": 1.0,
+            },
+        }
+    )
+
+
+def test_status_document_reports_unknown_without_runs(catalog: AbilityCatalog) -> None:
+    document = status_document(catalog, {})
+    assert document["schema"] == STATUS_SCHEMA
+    assert document["state"] == "unknown"
+    assert document["last_run_at"] == ""
+
+
+def test_status_document_flattens_every_value_to_a_string(
+    catalog: AbilityCatalog, tmp_path: Path
+) -> None:
+    """The consumer renders label/value pairs and knows nothing about this lab."""
+    log = tmp_path / "events.jsonl"
+    log.write_text(_completed("collect-host-identity") + "\n", encoding="utf-8")
+    document = status_document(catalog, summarize(load_events(log)))
+    assert isinstance(document["metrics"], list)
+    for metric in document["metrics"]:
+        assert set(metric) == {"label", "value"}
+        assert isinstance(metric["label"], str)
+        assert isinstance(metric["value"], str)
+
+
+def test_status_document_warns_on_a_failure(catalog: AbilityCatalog, tmp_path: Path) -> None:
+    log = tmp_path / "events.jsonl"
+    log.write_text(_completed("collect-host-identity", status="failed") + "\n", encoding="utf-8")
+    document = status_document(catalog, summarize(load_events(log)))
+    assert document["state"] == "warn"
+    assert "1 failed" in document["headline"]
+
+
+def test_status_document_is_ok_only_with_full_coverage(
+    catalog: AbilityCatalog, tmp_path: Path
+) -> None:
+    log = tmp_path / "events.jsonl"
+    log.write_text(
+        "\n".join(_completed(ability.id) for ability in catalog.all()) + "\n", encoding="utf-8"
+    )
+    document = status_document(catalog, summarize(load_events(log)))
+    assert document["state"] == "ok"
+    assert document["headline"] == f"{len(catalog.ids())}/{len(catalog.ids())} techniques covered"
+
+
+def test_report_status_writes_the_document_instead_of_the_table(tmp_path: Path, capsys) -> None:
+    log = tmp_path / "events.jsonl"
+    log.write_text(_completed("collect-host-identity") + "\n", encoding="utf-8")
+    status = tmp_path / "status.json"
+    cli.main(["report", "--log", str(log), "--status", str(status)])
+    document = json.loads(status.read_text(encoding="utf-8"))
+    assert document["schema"] == STATUS_SCHEMA
+    assert "ATT&CK coverage" not in capsys.readouterr().out
+
+
+def test_run_publishes_a_status_file_next_to_the_log(tmp_path: Path) -> None:
+    log = tmp_path / "run.jsonl"
+    cli.main(
+        ["run", "--executor", "dry-run", "--steps", "2", "--log", str(log), "--no-q-table"]
+    )
+    document = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))
+    assert document["schema"] == STATUS_SCHEMA
+    assert document["last_run_at"]
+
+
+def test_no_status_leaves_the_control_room_file_alone(tmp_path: Path) -> None:
+    log = tmp_path / "run.jsonl"
+    cli.main(
+        [
+            "run",
+            "--executor",
+            "dry-run",
+            "--steps",
+            "2",
+            "--log",
+            str(log),
+            "--no-q-table",
+            "--no-status",
+        ]
+    )
+    assert not (tmp_path / "status.json").exists()

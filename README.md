@@ -178,6 +178,31 @@ catalog의 `volatile_patterns`로 **능력별로 선언**해 해결합니다.
 `uid=65534` 같은 실제 발견까지 지워지기 때문입니다. 잘못된 정규식은 catalog 로드 시점에
 거부됩니다.
 
+
+### 상태 게시 (대시보드 연동)
+
+`run`과 `serve`는 실행이 끝나면 감사 로그 전체를 다시 집계해 `--log`와 같은 디렉터리에
+`status.json`을 씁니다. 위치는 `--status`로 바꾸고, `--no-status`로 끕니다. 감사 로그만 두고
+따로 만들려면 `report --status <path>`를 씁니다.
+
+```json
+{
+  "schema": "lab-status/1",
+  "generated_at": "2026-09-05T10:56:59Z",
+  "state": "ok",
+  "headline": "8/8 techniques covered",
+  "last_run_at": "2026-09-05T10:56:59Z",
+  "metrics": [{ "label": "ATT&CK coverage", "value": "8/8" }]
+}
+```
+
+소비자는 이 랩에 대해 아무것도 알 필요가 없습니다. ATT&CK 커버리지, planner 종류, 격리
+방식 같은 도메인 지식은 전부 이쪽에서 해석해 문자열 label/value 쌍으로 평탄화되며,
+소비자는 그대로 렌더링만 합니다. `state`는 `ok`, `warn`, `unknown` 중 하나입니다.
+
+`ai-security-lab-dashboard`가 이 파일을 `status_file`로 읽습니다. 대시보드는 이 파일을
+신뢰하지 않는 입력으로 다룹니다(스키마 확인, 경로 탈출 거부, 길이·개수 제한).
+
 ## 안전 경계
 
 - catalog에 없는 능력 ID와 임의 shell 문자열은 거부합니다.
@@ -219,7 +244,7 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 106 passed
+pytest             -> 113 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
@@ -233,6 +258,7 @@ Timeout            -> timed-out 상태, 컨테이너 누수 0건 (수정 전: �
 RL credit          -> 4 에이전트 동시 실행 시 고유 state 2 -> 8 (순차와 동일)
 Agent starvation   -> 98% -> 0% (200회 시행), 교착 없음
 GitHub Actions     -> success (quality 3.10/3.12 + docker-smoke)
+Status publishing  -> run 후 status.json 생성, 대시보드가 8/8 커버리지로 읽음
 ```
 
 ## 구조
@@ -246,10 +272,11 @@ Caldera_Lab/
 ├── src/caldera_lab/planner.py   # rule/LLM planner
 ├── src/caldera_lab/rl.py        # tabular Q policy + JSON 영속화
 ├── src/caldera_lab/reward.py    # 정보 이득 기반 보상
-├── src/caldera_lab/report.py    # 감사 로그 집계 + ATT&CK 커버리지
+├── src/caldera_lab/report.py    # 감사 로그 집계 + ATT&CK 커버리지 + 상태 문서
 ├── src/caldera_lab/coordinator.py  # planner+RL+보상 단일 결정 지점
 ├── src/caldera_lab/beacon.py    # loopback 전용 beacon 서버
 ├── src/caldera_lab/agent.py     # beacon 에이전트 (랩 측 supervisor)
+├── src/caldera_lab/clock.py     # 공용 UTC timestamp
 ├── src/caldera_lab/policy.py    # risk/network/승인 게이트
 ├── src/caldera_lab/executor.py  # Docker/local/dry-run executor
 └── src/caldera_lab/orchestrator.py

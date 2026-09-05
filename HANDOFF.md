@@ -194,8 +194,10 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
 3. ~~**RL 학습 지속성**~~, ~~**보상 설계**~~, ~~**변동성 출력 정규화**~~: 완료(5-1 참고).
 4. ~~**능력 catalog 확장**~~: 8개까지 확장 완료(5-1 참고). 더 늘리려면 `LabPolicy.max_steps`
    기본값(8)도 함께 올려야 합니다. timeout 처리와 테스트도 완료.
-5. **대시보드 연동**: 현재 대시보드는 `make test`만 제공합니다. `caldera-lab report --json`
-   출력을 그대로 쓸 수 있으므로 이를 대시보드에 노출할지 검토합니다.
+5. ~~**대시보드 연동**~~: 완료. 랩이 `.runtime/status.json`(`lab-status/1`)을 게시하고
+   `ai-security-lab-dashboard`가 `status_file`로 읽습니다. 대시보드는 이 파일을 신뢰하지
+   않는 입력으로 다룹니다(스키마 확인, 프로젝트 밖 경로·심볼릭 링크 거부, 길이·개수 제한).
+   두 저장소를 각각 커밋해야 합니다.
 6. ~~**CI Docker smoke test**~~: 완료. GitHub Actions에서 통과 확인함(run 33231936058,
    docker-smoke 15s).
 
