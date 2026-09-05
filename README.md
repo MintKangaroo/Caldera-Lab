@@ -155,8 +155,22 @@ agents=4     2 states     8 states
 agents=6     3 states     8 states
 ```
 
-다만 동시 실행의 state는 마지막 결과 성분이 아직 `|none`이므로, 순차 실행에서 학습한 Q table이
-동시 실행에 그대로 전이되지는 않습니다. 두 상황은 실제로 다른 상황이며, state가 이를 반영합니다.
+state의 두 번째 성분은 "직전 단계가 어떻게 끝났는지"가 아니라 **지금까지 실패가 있었는지**
+(`clean` / `degraded`)입니다. "직전 단계"는 두 모드에서 같은 뜻이 아닙니다. 동시 실행은 burst
+도중 완료된 단계가 아예 없으므로, 직전 결과 기준으로는 순차 실행이 한 번도 쓰지 않는 key를
+조회했고 한쪽에서 학습한 table이 다른 쪽에서는 무용지물이었습니다.
+
+```text
+                    직전 결과 기준   실패 여부 기준
+동시 실행 4 에이전트     38%              75%
+```
+
+남은 25%는 모드 불일치가 아니라 탐험으로 갈라진 경로입니다. 순차 학습은 한 경로만 방문하므로
+그 밖의 mask는 원래 table에 없습니다. 이 성분은 sticky합니다 — 한 번 실패하면 이후 복구해도
+`degraded`로 남습니다. "아직 아무 문제도 없었다"가 더는 참이 아니기 때문입니다.
+
+state의 의미가 바뀌었으므로 `Q_TABLE_VERSION`을 2로 올렸습니다. 버전 1 table은 조용히
+무시되고 빈 table로 시작합니다(`rl.loaded` 이벤트의 `restored: false`).
 
 ### 변동성 출력 정규화
 
@@ -244,7 +258,7 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 113 passed
+pytest             -> 117 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
@@ -256,6 +270,7 @@ Coordinator        -> beacon 실행에서 plan/RL/reward 이벤트 생성, Q tab
 ATT&CK coverage    -> 8 techniques (T1016/T1033/T1057/T1082/T1083/T1087.001/T1518/T1613)
 Timeout            -> timed-out 상태, 컨테이너 누수 0건 (수정 전: 컨테이너 계속 실행)
 RL credit          -> 4 에이전트 동시 실행 시 고유 state 2 -> 8 (순차와 동일)
+Q table 전이       -> 순차 학습 table의 동시 실행 적중률 38% -> 75%
 Agent starvation   -> 98% -> 0% (200회 시행), 교착 없음
 GitHub Actions     -> success (quality 3.10/3.12 + docker-smoke)
 Status publishing  -> run 후 status.json 생성, 대시보드가 8/8 커버리지로 읽음

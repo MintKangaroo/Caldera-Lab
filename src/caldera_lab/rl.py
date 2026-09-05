@@ -5,8 +5,15 @@ import random
 from pathlib import Path
 
 from .catalog import AbilityCatalog
+from .executor import SUCCESS_STATUSES
 
-Q_TABLE_VERSION = 1
+# 2: the outcome component became mode-invariant, so version 1 keys no longer
+# mean what they used to and must not be reloaded.
+Q_TABLE_VERSION = 2
+
+CLEAN = "clean"
+DEGRADED = "degraded"
+OUTCOMES = frozenset({CLEAN, DEGRADED})
 
 
 class QPolicy:
@@ -27,35 +34,44 @@ class QPolicy:
         self.gamma = gamma
         self.q: dict[tuple[str, str], float] = {}
 
-    def state_from(self, committed: frozenset[str] | set[str], last_status: str) -> str:
-        """Build a state from the abilities already committed and the last outcome.
+    def state_from(self, committed: frozenset[str] | set[str], outcome: str) -> str:
+        """Build a state from the abilities already committed and how the run is going.
 
         "Committed" means issued, not finished. Under concurrent dispatch a
         second agent is handed work before the first has reported, so a state
         built from completions alone would be identical for both and the two
         choices would fight over one table entry. Sequentially the two sets
         coincide, so this leaves single-agent behaviour unchanged.
+
+        The outcome component is whether anything has failed yet rather than
+        how the previous step ended. "The previous step" is not defined the
+        same way in both modes: mid-burst a concurrent run has no completed
+        step at all, so it asked for states a sequential run never visits and
+        a table learned in one mode was dead weight in the other.
         """
+        if outcome not in OUTCOMES:
+            raise ValueError(f"Unknown outcome: {outcome!r}")
         mask = "".join("1" if item in committed else "0" for item in self.catalog.ids())
-        return f"{mask}|{last_status or 'none'}"
+        return f"{mask}|{outcome}"
 
     def state(self, observations: tuple[str, ...]) -> str:
         """Abstract observations into a state the table can actually revisit.
 
         Hashing the raw observation history made every state unique, so no
         (state, action) entry was ever read back and learning was inert. The
-        state is instead which abilities have completed plus how the last one
-        ended, which bounds the space at 2^len(catalog) * 3.
+        state is instead which abilities have completed plus whether anything
+        has failed, which bounds the space at 2^len(catalog) * 2.
         """
         completed: set[str] = set()
-        last = "none"
+        outcome = CLEAN
         for observation in observations:
             ability_id, _, remainder = observation.partition(":")
             status, _, _ = remainder.partition(":")
             if ability_id in self.catalog.ids():
                 completed.add(ability_id)
-            last = status or "none"
-        return self.state_from(completed, last)
+            if status and status not in SUCCESS_STATUSES:
+                outcome = DEGRADED
+        return self.state_from(completed, outcome)
 
     def choose(self, state: str, candidates: tuple[str, ...]) -> str:
         if not candidates:

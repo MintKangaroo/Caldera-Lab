@@ -36,7 +36,7 @@ from caldera_lab.report import (
     summarize,
 )
 from caldera_lab.reward import RewardModel
-from caldera_lab.rl import QPolicy
+from caldera_lab.rl import Q_TABLE_VERSION, QPolicy
 
 ROOT = Path(__file__).parents[1]
 
@@ -252,12 +252,12 @@ def test_state_is_bounded_and_revisited(catalog: AbilityCatalog) -> None:
     forward = policy.state(("collect-host-identity:succeeded:0", "collect-system-info:succeeded:0"))
     reverse = policy.state(("collect-system-info:succeeded:0", "collect-host-identity:succeeded:0"))
     assert forward == reverse
-    assert forward == "11000000|succeeded"
+    assert forward == "11000000|clean"
     # A failure is a different state than a success over the same set.
     assert policy.state(("collect-host-identity:failed:1",)) != policy.state(
         ("collect-host-identity:succeeded:0",)
     )
-    assert policy.state(()) == "0" * len(catalog.ids()) + "|none"
+    assert policy.state(()) == "0" * len(catalog.ids()) + "|clean"
 
 
 def test_learning_reaches_entries_it_has_already_written(catalog: AbilityCatalog) -> None:
@@ -298,7 +298,10 @@ def test_q_table_is_rejected_when_corrupt(catalog: AbilityCatalog, tmp_path: Pat
     path = tmp_path / "q.json"
     path.write_text("{ not json", encoding="utf-8")
     assert QPolicy(catalog).load(path) is False
-    path.write_text(json.dumps({"version": 1, "catalog": "x", "entries": "nope"}), encoding="utf-8")
+    path.write_text(
+        json.dumps({"version": Q_TABLE_VERSION, "catalog": "x", "entries": "nope"}),
+        encoding="utf-8",
+    )
     assert QPolicy(catalog).load(path) is False
 
 
@@ -310,9 +313,9 @@ def test_q_table_rejects_actions_outside_the_catalog(
     path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": Q_TABLE_VERSION,
                 "catalog": policy.fingerprint(),
-                "entries": [{"state": "0" * 8 + "|none", "action": "rm -rf /", "value": 9.0}],
+                "entries": [{"state": "0" * 8 + "|clean", "action": "rm -rf /", "value": 9.0}],
             }
         ),
         encoding="utf-8",
@@ -1370,7 +1373,7 @@ def test_state_is_built_from_issued_not_completed_work(catalog: AbilityCatalog) 
     # have shared the empty state and fought over one table entry.
     pending_states = {value[0] for value in coordinator._pending.values()}
     assert len(pending_states) == 2
-    assert coordinator.rl.state_from(set(), "none") in pending_states
+    assert coordinator.rl.state_from(set(), "clean") in pending_states
 
 
 def test_concurrent_dispatch_keeps_states_distinct(catalog: AbilityCatalog) -> None:
@@ -1387,8 +1390,8 @@ def test_sequential_state_sequence_is_unchanged(catalog: AbilityCatalog) -> None
     orchestrator = Orchestrator(catalog, DryRunExecutor(), planner_mode="rules")
     orchestrator.run(4)
     masks = sorted(key[0] for key in orchestrator.rl.q)
-    assert masks[0] == "0" * len(catalog.ids()) + "|none"
-    assert all(mask.endswith("|planned") for mask in masks[1:])
+    assert masks[0] == "0" * len(catalog.ids()) + "|clean"
+    assert all(mask.endswith("|clean") for mask in masks)
     assert len(set(masks)) == 4
 
 
@@ -1396,7 +1399,7 @@ def test_state_from_matches_the_observation_derived_state(catalog: AbilityCatalo
     policy = QPolicy(catalog)
     observations = ("collect-host-identity:succeeded:0", "collect-system-info:succeeded:0")
     assert policy.state(observations) == policy.state_from(
-        {"collect-host-identity", "collect-system-info"}, "succeeded"
+        {"collect-host-identity", "collect-system-info"}, "clean"
     )
 
 
@@ -1493,3 +1496,69 @@ def test_no_status_leaves_the_control_room_file_alone(tmp_path: Path) -> None:
         ]
     )
     assert not (tmp_path / "status.json").exists()
+
+
+def _states_of(coordinator: Coordinator) -> set[str]:
+    return {value[0] for value in coordinator._pending.values()}
+
+
+def _executed(ability_id: str, status: str = "succeeded") -> ExecutionResult:
+    return ExecutionResult(ability_id, status, f"output for {ability_id}", "", 0, "dry-run", 0.1)
+
+
+def test_a_concurrent_burst_asks_for_states_a_sequential_run_also_visits(
+    catalog: AbilityCatalog,
+) -> None:
+    """The two modes have to share a table or learning in one is dead weight
+    in the other. Mid-burst nothing has completed, so an outcome component
+    meaning "how the last step ended" put the burst on keys sequential runs
+    never wrote."""
+    sequential = Coordinator(catalog, planner_mode="rules", max_steps=4)
+    visited: set[str] = set()
+    while (ability_id := sequential.next_ability()) is not None:
+        visited |= _states_of(sequential)
+        sequential.record_result(_executed(ability_id))
+
+    concurrent = Coordinator(catalog, planner_mode="rules", max_steps=4)
+    for index in range(4):
+        concurrent.next_ability(f"agent-{index + 1}")
+    assert _states_of(concurrent) <= visited
+
+
+def test_a_failure_marks_the_run_degraded_for_good(catalog: AbilityCatalog) -> None:
+    coordinator = Coordinator(catalog, planner_mode="rules", max_steps=3)
+    first = coordinator.next_ability()
+    coordinator.record_result(_executed(first, status="failed"))
+    second = coordinator.next_ability()
+    assert all(state.endswith("|degraded") for state in _states_of(coordinator))
+    # Recovering does not erase it: "nothing has gone wrong yet" is no longer true.
+    coordinator.record_result(_executed(second))
+    coordinator.next_ability()
+    assert all(state.endswith("|degraded") for state in _states_of(coordinator))
+
+
+def test_state_from_refuses_an_outcome_it_does_not_model(catalog: AbilityCatalog) -> None:
+    with pytest.raises(ValueError):
+        QPolicy(catalog).state_from(set(), "succeeded")
+
+
+def test_a_table_from_the_previous_state_layout_is_refused(
+    catalog: AbilityCatalog, tmp_path: Path
+) -> None:
+    """Version 1 keys carried "|succeeded" and "|none" and mean something else now."""
+    path = tmp_path / "q.json"
+    policy = QPolicy(catalog)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "catalog": policy.fingerprint(),
+                "entries": [
+                    {"state": "0" * 8 + "|none", "action": catalog.ids()[0], "value": 4.0}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert policy.load(path) is False
+    assert policy.q == {}

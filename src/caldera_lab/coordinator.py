@@ -7,11 +7,11 @@ from pathlib import Path
 
 from .catalog import AbilityCatalog
 from .clock import now
-from .executor import ExecutionResult
+from .executor import SUCCESS_STATUSES, ExecutionResult
 from .planner import LLMPlanner, Plan, RulePlanner
 from .policy import LabPolicy
 from .reward import RewardModel
-from .rl import QPolicy
+from .rl import CLEAN, DEGRADED, QPolicy
 
 
 @dataclass(frozen=True)
@@ -68,7 +68,7 @@ class Coordinator:
         self._lock = threading.Lock()
         self._observations: tuple[str, ...] = ()
         self._used: set[str] = set()
-        self._last_status = "none"
+        self._outcome = CLEAN
         self._issued = 0
         self._pending: dict[str, tuple[str, str]] = {}
         self._started = False
@@ -159,7 +159,7 @@ class Coordinator:
             index = self._issued
             # Built from what has been issued, not what has finished, so two
             # concurrent hand-outs do not collapse onto the same state.
-            state = self.rl.state_from(frozenset(self._used), self._last_status)
+            state = self.rl.state_from(frozenset(self._used), self._outcome)
             policy = self.policy_for(agent_id)
             # Only offer this agent what its own policy permits, then validate;
             # otherwise one restricted agent would stall the whole run.
@@ -215,7 +215,7 @@ class Coordinator:
             state, ability_id = self._pending.pop(
                 key,
                 (
-                    self.rl.state_from(frozenset(self._used), self._last_status),
+                    self.rl.state_from(frozenset(self._used), self._outcome),
                     result.ability_id,
                 ),
             )
@@ -230,8 +230,9 @@ class Coordinator:
                 "reward.scored",
                 {"agent_id": agent_id, "ability_id": ability_id, **breakdown.as_details()},
             )
-            self._last_status = result.status
-            next_state = self.rl.state_from(frozenset(self._used), self._last_status)
+            if result.status not in SUCCESS_STATUSES:
+                self._outcome = DEGRADED
+            next_state = self.rl.state_from(frozenset(self._used), self._outcome)
             self.rl.update(state, ability_id, breakdown.total, next_state)
             remaining = self.limit - self._issued
             if remaining > 0:

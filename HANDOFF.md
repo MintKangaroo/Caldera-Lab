@@ -201,7 +201,11 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
 6. ~~**CI Docker smoke test**~~: 완료. GitHub Actions에서 통과 확인함(run 33231936058,
    docker-smoke 15s).
 
-7. **LICENSE 미정**: 아직 없습니다. 공개 저장소이므로 선택이 필요합니다.
+7. ~~**순차↔동시 Q table 전이**~~: 완료. state의 두 번째 성분을 "직전 결과"에서 "지금까지
+   실패 여부"(`clean`/`degraded`)로 바꿔 두 모드가 같은 key를 씁니다. 적중률 38% -> 75%
+   (남은 차이는 탐험 경로 분기). `Q_TABLE_VERSION` 2로 상승, 버전 1 table은 거부됩니다.
+
+8. **LICENSE 미정**: 아직 없습니다. 공개 저장소이므로 선택이 필요합니다.
 
 ## 7. 시작 전 확인 명령
 
