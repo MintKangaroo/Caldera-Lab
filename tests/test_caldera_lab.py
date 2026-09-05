@@ -1972,3 +1972,63 @@ def test_the_reward_records_the_depth_it_paid_for(catalog: AbilityCatalog) -> No
     assert scored["collect-process-list"]["discovery_depth"] == 0
     assert scored["inspect-process-status"]["discovery_depth"] == 1
     assert scored["inspect-process-status"]["depth_reward"] > 0
+
+
+def _discounted(order: list[tuple[str, int]], gamma: float = 0.85) -> float:
+    """Discounted return of one ordering, scored as a run would score it."""
+    model = RewardModel()
+    policy = LabPolicy()
+    total = 0.0
+    for step, (ability_id, depth) in enumerate(order):
+        breakdown = model.score(
+            ExecutionResult(ability_id, "succeeded", f"{ability_id} line\n", "", 0, "dry-run", 0.0),
+            policy,
+            depth=depth,
+        )
+        total += gamma**step * breakdown.total
+    return total
+
+
+def test_harvesting_a_discovery_early_is_worth_more_than_deferring_it() -> None:
+    """This is the property that makes ordering learnable at all.
+
+    Total reward is a function of the set executed, so a full sweep pays the
+    same whatever the order. Discounting is what separates orders, and only
+    once abilities differ in value -- which is what depth provides.
+    """
+    surface = ("collect-surface", 0)
+    producer = ("collect-producer", 0)
+    gated = ("inspect-gated", 1)
+
+    early = _discounted([producer, gated, surface])
+    late = _discounted([surface, producer, gated])
+    assert early > late
+
+    # Without a depth reward the same two orders are worth exactly the same,
+    # which is the state this replaced.
+    flat_early = _discounted([producer, ("inspect-gated", 0), surface])
+    flat_late = _discounted([surface, producer, ("inspect-gated", 0)])
+    assert flat_early == pytest.approx(flat_late)
+
+
+def test_a_full_sweep_pays_the_same_total_whatever_the_order() -> None:
+    """The reward stays a set function; only the discounting makes order
+    matter. Recorded so a change that breaks it is deliberate."""
+    order = [("a", 0), ("b", 0), ("c", 1)]
+    forward = sum(
+        RewardModel().score(
+            ExecutionResult(i, "succeeded", f"{i} line\n", "", 0, "dry-run", 0.0),
+            LabPolicy(),
+            depth=d,
+        ).total
+        for i, d in order
+    )
+    backward = sum(
+        RewardModel().score(
+            ExecutionResult(i, "succeeded", f"{i} line\n", "", 0, "dry-run", 0.0),
+            LabPolicy(),
+            depth=d,
+        ).total
+        for i, d in reversed(order)
+    )
+    assert forward == pytest.approx(backward)

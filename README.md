@@ -263,23 +263,53 @@ state의 의미가 바뀌었으므로 `Q_TABLE_VERSION`을 2로 올렸습니다.
 최대화하므로, 능력마다 값이 다르면 값진 것을 먼저 하는 편이 유리해집니다.
 
 ```text
-전량 실행 300개 무작위 순서 (gamma 0.85)
-  총 보상        편차 0.000   (여전히 집합 함수)
-  할인된 수익    6.997 ~ 7.285, 편차 0.289
+실제 컨테이너 출력, 전량 실행 300개 무작위 순서 (gamma 0.85)
+  총 보상        편차 0.0000            <- 여전히 집합 함수
+  할인된 수익    7.2615 ~ 7.7416        <- 여기서 순서가 갈립니다
 ```
 
-측정한 학습 곡선입니다. 달성 가능한 범위 안에서의 위치입니다.
+측정 기준을 정확히 잡는 것이 이 실험에서 제일 어려웠습니다. 처음에는 무작위 순서 300개의
+최고값을 상한으로 썼는데, 그건 최적이 아닙니다. 능력별 보상이 순서와 무관하므로 2^11개
+부분집합에 대한 DP로 **정확한 최적 순서**를 구할 수 있습니다.
 
 ```text
-untrained        0%
-800 에피소드    30%
-2500 에피소드   59%
-6000 에피소드   59%   <- 정체
+최적 순서    7.8650   process-list -> inspect-process-status ->
+                      installed-packages -> inspect-package-contents -> ...
+최악 순서    7.2615   = catalog 순서 (학습 전 정책이 실행하는 바로 그 순서)
+학습 여지    0.6034
 ```
 
-**학습은 실제로 일어나지만 최적에 못 미친 채 정체합니다.** 상태 추상화가 어떤 fact를
-알고 있는지가 아니라 어떤 능력을 배정했는지만 담고 있고, 4096개 상태를 에피소드당 11단계로
-훑기에는 탐험이 얇습니다. 이건 아직 해결하지 않았습니다.
+최적 정책은 해석 가능합니다: **생산자를 실행하고 그 후속을 곧바로 수확**하는 것을 세 번
+반복한 뒤 나머지를 처리합니다. 잠금 해제를 미룰 이유가 없고, 깊은 발견은 할인 때문에 이를수록
+값집니다.
+
+```text
+학습 전          7.2615    0.0% of headroom
+  800 에피소드   7.3584   16.1%
+ 2500 에피소드   7.5051   40.4%
+ 6000 에피소드   7.5558   48.8%
+12000 에피소드   7.5762   52.2%
+25000 에피소드   7.6003   56.1%
+```
+
+25000 에피소드의 실행 순서입니다.
+
+```text
+collect-host-identity      collect-system-info
+collect-process-list    -> inspect-process-status
+collect-installed-packages -> inspect-package-contents
+collect-account-list    -> inspect-account-identity
+collect-network-interfaces  collect-container-context  collect-workspace-files
+```
+
+**세 쌍이 모두 올바르게 짝지어져 있습니다.** 정책은 "생산자를 실행하고 곧바로 수확한다"를
+학습했습니다. 최적과의 차이는 앞의 표면 능력 두 개(`collect-host-identity`,
+`collect-system-info`)를 먼저 실행하는 것뿐입니다.
+
+여전히 최적이 아니고 수렴도 느립니다(25000 에피소드에서도 상승 중). 시작 상태에서 두 선택지의
+가치 차이가 작고, state가 어떤 fact를 아는지가 아니라 어떤 능력을 배정했는지만 담아 4096개
+상태를 훑기에는 탐험이 얇습니다. 측정 장치는 갖춰져 있으므로 상태 표현이나 탐험 전략을
+바꿔가며 비교할 수 있습니다.
 
 ### 변동성 출력 정규화
 
@@ -367,7 +397,7 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 150 passed
+pytest             -> 158 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
@@ -382,7 +412,9 @@ Fact 추출          -> pid 1개, package 20개, account 17개 (실제 컨테이
 Timeout            -> timed-out 상태, 컨테이너 누수 0건 (수정 전: 컨테이너 계속 실행)
 RL credit          -> 4 에이전트 동시 실행 시 고유 state 2 -> 8 (순차와 동일)
 RL 행동 공간       -> 잠금 해제된 작업이 후보에서 누락되던 문제 수정 (2/6 -> 6/6)
-RL 순서 학습       -> 깊이 보상 도입 후 할인 수익 기준 0% -> 59% (2500 에피소드에서 정체)
+RL 순서 학습       -> 깊이 보상 후 학습 여지의 0% -> 56.1% (25000 에피소드, DP 최적 대비)
+                      생산자->후속 짝짓기 3쌍 모두 학습됨
+최적 순서          -> 2^11 부분집합 DP로 정확히 계산, 최악 순서 = catalog 순서
 Q table 전이       -> 순차 학습 table의 동시 실행 적중률 38% -> 75%
 Agent starvation   -> 98% -> 0% (200회 시행), 교착 없음
 GitHub Actions     -> success (quality 3.10/3.12 + docker-smoke)
