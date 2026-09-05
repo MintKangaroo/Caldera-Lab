@@ -17,7 +17,9 @@ class RewardBreakdown:
     total: float
     outcome: float
     information_gain: float
+    depth_reward: float
     cost: float
+    discovery_depth: int
     novel_facts: int
     known_facts: int
     normalized: bool = False
@@ -41,11 +43,17 @@ class RewardModel:
         success_reward: float = 0.25,
         failure_penalty: float = -1.0,
         information_weight: float = 1.0,
+        depth_weight: float = 0.5,
         cost_weight: float = 0.25,
     ) -> None:
         self.success_reward = success_reward
         self.failure_penalty = failure_penalty
         self.information_weight = information_weight
+        # A finding that stands on an earlier discovery is worth more than a
+        # surface read. This is also the only term that makes the order of a
+        # run matter: the reward is otherwise a function of the set of
+        # abilities executed, so under discounting every order paid the same.
+        self.depth_weight = depth_weight
         self.cost_weight = cost_weight
         self._seen: set[str] = set()
 
@@ -76,6 +84,7 @@ class RewardModel:
         result: ExecutionResult,
         policy: LabPolicy,
         ability: Ability | None = None,
+        depth: int = 0,
     ) -> RewardBreakdown:
         succeeded = result.status in SUCCESS_STATUSES
         outcome = self.success_reward if succeeded else self.failure_penalty
@@ -94,14 +103,18 @@ class RewardModel:
         observed = novel + known
         gain = self.information_weight * (novel / observed) if observed else 0.0
 
+        depth_reward = self.depth_weight * depth if succeeded else 0.0
+
         budget = max(policy.timeout_seconds, 1)
         cost = self.cost_weight * min(1.0, max(0.0, result.duration_seconds) / budget)
 
         return RewardBreakdown(
-            total=round(outcome + gain - cost, 6),
+            total=round(outcome + gain + depth_reward - cost, 6),
             outcome=round(outcome, 6),
             information_gain=round(gain, 6),
+            depth_reward=round(depth_reward, 6),
             cost=round(cost, 6),
+            discovery_depth=depth,
             novel_facts=novel,
             known_facts=known,
             normalized=bool(patterns),

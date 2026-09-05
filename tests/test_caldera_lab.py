@@ -1866,3 +1866,109 @@ def test_optimism_survives_a_round_trip(catalog: AbilityCatalog, tmp_path: Path)
     restored = QPolicy(catalog, optimism=2.0)
     assert restored.load(path) is True
     assert restored.value("s", catalog.ids()[1]) == 2.0
+
+
+def test_depth_is_the_shallowest_chain_that_reaches_an_ability(
+    catalog: AbilityCatalog,
+) -> None:
+    for ability in catalog.all():
+        assert catalog.depth(ability.id) == (1 if ability.requires else 0)
+
+
+def test_depth_counts_a_longer_chain(tmp_path: Path) -> None:
+    catalog = _catalog_from(
+        {
+            "traits": {"host.process.pid": "^[0-9]{1,7}$", "deep": "^[a-z]+$"},
+            "abilities": [
+                _producer(),
+                _minimal(produces=[{"trait": "deep", "pattern": "(?m)^([a-z]+)$"}]),
+                {
+                    "id": "deeper",
+                    "name": "Deeper",
+                    "tactic": "discovery",
+                    "technique": "T0003",
+                    "command": ["cat", "{deep}"],
+                    "description": "d",
+                    "requires": ["deep"],
+                },
+            ],
+        },
+        tmp_path,
+    )
+    assert catalog.depth("lister") == 0
+    assert catalog.depth("probe") == 1
+    assert catalog.depth("deeper") == 2
+
+
+def test_a_dependency_cycle_is_refused_at_load(tmp_path: Path) -> None:
+    """Abilities in a cycle can never run: each waits for a trait only the
+    other supplies. Nothing at runtime would report that."""
+    with pytest.raises(ValueError, match="cycle"):
+        _catalog_from(
+            {
+                "traits": {"a": "^[a-z]+$", "b": "^[a-z]+$"},
+                "abilities": [
+                    {
+                        "id": "first",
+                        "name": "First",
+                        "tactic": "discovery",
+                        "technique": "T1",
+                        "command": ["cat", "{b}"],
+                        "description": "d",
+                        "requires": ["b"],
+                        "produces": [{"trait": "a", "pattern": "^([a-z]+)$"}],
+                    },
+                    {
+                        "id": "second",
+                        "name": "Second",
+                        "tactic": "discovery",
+                        "technique": "T2",
+                        "command": ["cat", "{a}"],
+                        "description": "d",
+                        "requires": ["a"],
+                        "produces": [{"trait": "b", "pattern": "^([a-z]+)$"}],
+                    },
+                ],
+            },
+            tmp_path,
+        )
+
+
+def test_a_deeper_finding_is_worth_more_than_a_surface_one() -> None:
+    """Without this the reward is a function of the set executed, so under
+    discounting every feasible order pays exactly the same."""
+    model = RewardModel()
+    policy = LabPolicy()
+    surface = model.score(_result("alpha\n"), policy, depth=0)
+    model.reset()
+    deep = model.score(_result("alpha\n"), policy, depth=1)
+    assert deep.total > surface.total
+    assert deep.depth_reward == 0.5
+    assert surface.depth_reward == 0.0
+    assert deep.discovery_depth == 1
+
+
+def test_depth_pays_nothing_for_a_failure() -> None:
+    breakdown = RewardModel().score(_result("", status="failed"), LabPolicy(), depth=2)
+    assert breakdown.depth_reward == 0.0
+
+
+def test_the_reward_records_the_depth_it_paid_for(catalog: AbilityCatalog) -> None:
+    coordinator = Coordinator(catalog, planner_mode="rules", max_steps=len(catalog.ids()))
+    coordinator.start()
+    coordinator.record_result(
+        ExecutionResult(
+            "collect-process-list", "succeeded", "UID PID\nnobody 3 0 x\n", "", 0, "dry-run", 0.1
+        )
+    )
+    coordinator.record_result(
+        ExecutionResult("inspect-process-status", "succeeded", "Name: cat\n", "", 0, "dry-run", 0.1)
+    )
+    scored = {
+        event.details["ability_id"]: event.details
+        for event in coordinator.events
+        if event.event == "reward.scored"
+    }
+    assert scored["collect-process-list"]["discovery_depth"] == 0
+    assert scored["inspect-process-status"]["discovery_depth"] == 1
+    assert scored["inspect-process-status"]["depth_reward"] > 0

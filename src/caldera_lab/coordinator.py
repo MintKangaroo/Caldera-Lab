@@ -287,7 +287,12 @@ class Coordinator:
                         "unlocked": unlocked,
                     },
                 )
-            breakdown = self.reward_model.score(result, self.policy_for(agent_id), ability)
+            breakdown = self.reward_model.score(
+                result,
+                self.policy_for(agent_id),
+                ability,
+                depth=self.catalog.depth(ability_id),
+            )
             self._emit(
                 "reward.scored",
                 {"agent_id": agent_id, "ability_id": ability_id, **breakdown.as_details()},

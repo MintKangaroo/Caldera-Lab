@@ -47,6 +47,16 @@ class AbilityCatalog:
         # producing ability, so every producer and every consumer of a value
         # agrees on what that value may contain.
         self._traits = dict(traits or {})
+        self._depth: dict[str, int] = {}
+
+    def depth(self, ability_id: str) -> int:
+        """How many discoveries this ability stands on.
+
+        Zero for something runnable from the start; one more than the shallowest
+        chain that can supply each trait it requires. It is a property of the
+        catalog, not of a run, so it is computed once at load.
+        """
+        return self._depth[ability_id]
 
     def trait_pattern(self, trait: str) -> str:
         try:
@@ -135,7 +145,44 @@ class AbilityCatalog:
             )
         catalog = cls(tuple(abilities), traits)
         catalog._reject_unreachable()
+        catalog._depth = catalog._measure_depth()
         return catalog
+
+    def _measure_depth(self) -> dict[str, int]:
+        """Depth per ability, refusing a dependency cycle.
+
+        Abilities in a cycle can never run: each waits for a trait only the
+        other can supply. Nothing at runtime would report that -- they would
+        just silently never be offered -- so it is refused at load.
+        """
+        producers: dict[str, list[str]] = {}
+        for ability in self._abilities.values():
+            for producer in ability.produces:
+                producers.setdefault(producer.trait, []).append(ability.id)
+
+        depths: dict[str, int] = {}
+        visiting: set[str] = set()
+
+        def measure(ability_id: str) -> int:
+            if ability_id in depths:
+                return depths[ability_id]
+            if ability_id in visiting:
+                raise ValueError(f"Ability dependencies form a cycle at {ability_id}")
+            visiting.add(ability_id)
+            ability = self._abilities[ability_id]
+            # Every required trait must be satisfied, but each may be satisfied
+            # by whichever producer needs the least discovery.
+            depth = 0
+            if ability.requires:
+                depth = 1 + max(
+                    min(measure(source) for source in producers[trait])
+                    for trait in ability.requires
+                )
+            visiting.discard(ability_id)
+            depths[ability_id] = depth
+            return depth
+
+        return {ability_id: measure(ability_id) for ability_id in self._abilities}
 
     def _reject_unreachable(self) -> None:
         """Refuse a catalog where an ability can never become available.
