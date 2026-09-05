@@ -37,6 +37,11 @@ class BeaconState:
     The server can only name an ability the agent already has in its own
     catalog, so a compromised or spoofed server cannot introduce a new command
     into the lab. This is the same boundary the LLM planner sits behind.
+
+    An ability that needs a discovered value also receives that value, because
+    only the lab holds the facts. The value is not a command either: the agent
+    substitutes it into its own argv template and re-validates it against its
+    own trait pattern first.
     """
 
     def __init__(
@@ -44,12 +49,18 @@ class BeaconState:
         catalog: AbilityCatalog,
         queue: tuple[str, ...] = (),
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
-        task_source: Callable[[str], str | None] | None = None,
+        task_source: Callable[[str], Any | None] | None = None,
         result_sink: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.catalog = catalog
         for ability_id in queue:
-            self.catalog.get(ability_id)
+            ability = self.catalog.get(ability_id)
+            # Nothing supplies facts to a fixed queue, so a gated ability there
+            # could only ever fail at execution time. Refuse it up front.
+            if ability.requires and task_source is None:
+                raise BeaconRefused(
+                    f"{ability_id} needs discovered facts and cannot be queued statically"
+                )
         self.queue: list[str] = list(queue)
         # When a coordinator is supplied, the planner and the RL policy decide
         # what each agent gets. The static queue is only the fallback used by
@@ -79,11 +90,14 @@ class BeaconState:
                 raise UnknownAgent(agent_id)
             record.registered_at_beacons += 1
             beacons = record.registered_at_beacons
+            bindings: dict[str, str] = {}
             if self.task_source is not None:
-                ability_id = self.task_source(agent_id)
+                assignment = self.task_source(agent_id)
+                ability_id = getattr(assignment, "ability_id", None)
                 if ability_id is not None:
                     # A coordinator can only name what the catalog declares.
                     self.catalog.get(ability_id)
+                    bindings = dict(getattr(assignment, "bindings", {}) or {})
                 remaining = -1
             else:
                 ability_id = self.queue.pop(0) if self.queue else None
@@ -95,9 +109,10 @@ class BeaconState:
                 "ability_id": ability_id,
                 "beacon": beacons,
                 "queue_remaining": remaining,
+                "bindings": dict(bindings),
             },
         )
-        return {"ability_id": ability_id}
+        return {"ability_id": ability_id, "bindings": bindings}
 
     def record_result(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         ability_id = payload.get("ability_id")

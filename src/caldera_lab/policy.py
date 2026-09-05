@@ -7,7 +7,7 @@ from .catalog import AbilityCatalog
 
 @dataclass(frozen=True)
 class LabPolicy:
-    max_steps: int = 8
+    max_steps: int = 12
     timeout_seconds: int = 20
     allow_network: bool = False
     require_approval: bool = True

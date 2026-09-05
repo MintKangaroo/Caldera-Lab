@@ -154,7 +154,7 @@ def _serve(
     state = BeaconState(
         catalog,
         on_event=sink.record,
-        task_source=coordinator.next_ability,
+        task_source=coordinator.next_assignment,
         result_sink=record,
     )
     failures: list[BaseException] = []

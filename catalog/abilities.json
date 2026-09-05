@@ -1,111 +1,187 @@
-[
-  {
-    "id": "collect-host-identity",
-    "name": "Collect host identity",
-    "tactic": "discovery",
-    "technique": "T1033",
-    "command": [
-      "id"
-    ],
-    "description": "Collect the isolated agent identity for lab telemetry.",
-    "risk": "low"
+{
+  "traits": {
+    "host.process.pid": "^[0-9]{1,7}$",
+    "host.package.name": "^[a-z0-9][a-z0-9._+-]{0,63}$",
+    "host.account.name": "^[a-z_][a-z0-9_-]{0,31}$"
   },
-  {
-    "id": "collect-system-info",
-    "name": "Collect system information",
-    "tactic": "discovery",
-    "technique": "T1082",
-    "command": [
-      "uname",
-      "-a"
-    ],
-    "description": "Collect kernel information from the isolated target.",
-    "risk": "low",
-    "volatile_patterns": [
-      "\\b[0-9a-f]{12}\\b"
-    ]
-  },
-  {
-    "id": "collect-process-list",
-    "name": "Collect process list",
-    "tactic": "discovery",
-    "technique": "T1057",
-    "command": [
-      "ps",
-      "-ef"
-    ],
-    "description": "Collect processes visible inside the isolated target.",
-    "risk": "low",
-    "volatile_patterns": [
-      "\\d+(?= \\d{2}:\\d{2} )",
-      "\\b\\d{2}:\\d{2}(:\\d{2})?\\b"
-    ]
-  },
-  {
-    "id": "collect-workspace-files",
-    "name": "Collect workspace listing",
-    "tactic": "discovery",
-    "technique": "T1083",
-    "command": [
-      "find",
-      "/workspace",
-      "-maxdepth",
-      "2",
-      "-type",
-      "f"
-    ],
-    "description": "List only the explicitly mounted lab workspace.",
-    "risk": "low"
-  },
-  {
-    "id": "collect-account-list",
-    "name": "Collect local accounts",
-    "tactic": "discovery",
-    "technique": "T1087.001",
-    "command": [
-      "cat",
-      "/etc/passwd"
-    ],
-    "description": "List local account entries. /etc/passwd holds no secrets; shadow is not readable by the unprivileged agent.",
-    "risk": "low"
-  },
-  {
-    "id": "collect-container-context",
-    "name": "Collect container context",
-    "tactic": "discovery",
-    "technique": "T1613",
-    "command": [
-      "cat",
-      "/proc/self/cgroup"
-    ],
-    "description": "Determine whether the agent is running inside a container.",
-    "risk": "low"
-  },
-  {
-    "id": "collect-network-interfaces",
-    "name": "Collect network interfaces",
-    "tactic": "discovery",
-    "technique": "T1016",
-    "command": [
-      "cat",
-      "/proc/net/dev"
-    ],
-    "description": "Read interface statistics. In the default lab this shows only loopback, evidencing that the sandbox has no network.",
-    "risk": "low",
-    "volatile_patterns": [
-      "\\b\\d+\\b"
-    ]
-  },
-  {
-    "id": "collect-installed-packages",
-    "name": "Collect installed packages",
-    "tactic": "discovery",
-    "technique": "T1518",
-    "command": [
-      "apk",
-      "info"
-    ],
-    "description": "List packages present in the isolated image.",
-    "risk": "low"
-  }
-]
+  "abilities": [
+    {
+      "id": "collect-host-identity",
+      "name": "Collect host identity",
+      "tactic": "discovery",
+      "technique": "T1033",
+      "command": [
+        "id"
+      ],
+      "description": "Collect the isolated agent identity for lab telemetry.",
+      "risk": "low"
+    },
+    {
+      "id": "collect-system-info",
+      "name": "Collect system information",
+      "tactic": "discovery",
+      "technique": "T1082",
+      "command": [
+        "uname",
+        "-a"
+      ],
+      "description": "Collect kernel information from the isolated target.",
+      "risk": "low",
+      "volatile_patterns": [
+        "\\b[0-9a-f]{12}\\b"
+      ]
+    },
+    {
+      "id": "collect-process-list",
+      "name": "Collect process list",
+      "tactic": "discovery",
+      "technique": "T1057",
+      "command": [
+        "ps",
+        "-ef"
+      ],
+      "description": "Collect processes visible inside the isolated target.",
+      "risk": "low",
+      "volatile_patterns": [
+        "\\d+(?= \\d{2}:\\d{2} )",
+        "\\b\\d{2}:\\d{2}(:\\d{2})?\\b"
+      ],
+      "produces": [
+        {
+          "trait": "host.process.pid",
+          "pattern": "(?m)^\\S+\\s+(\\d{1,7})\\s+\\d+\\s"
+        }
+      ]
+    },
+    {
+      "id": "collect-workspace-files",
+      "name": "Collect workspace listing",
+      "tactic": "discovery",
+      "technique": "T1083",
+      "command": [
+        "find",
+        "/workspace",
+        "-maxdepth",
+        "2",
+        "-type",
+        "f"
+      ],
+      "description": "List only the explicitly mounted lab workspace.",
+      "risk": "low"
+    },
+    {
+      "id": "collect-account-list",
+      "name": "Collect local accounts",
+      "tactic": "discovery",
+      "technique": "T1087.001",
+      "command": [
+        "cat",
+        "/etc/passwd"
+      ],
+      "description": "List local account entries. /etc/passwd holds no secrets; shadow is not readable by the unprivileged agent.",
+      "risk": "low",
+      "produces": [
+        {
+          "trait": "host.account.name",
+          "pattern": "(?m)^([a-z_][a-z0-9_-]*):"
+        }
+      ]
+    },
+    {
+      "id": "collect-container-context",
+      "name": "Collect container context",
+      "tactic": "discovery",
+      "technique": "T1613",
+      "command": [
+        "cat",
+        "/proc/self/cgroup"
+      ],
+      "description": "Determine whether the agent is running inside a container.",
+      "risk": "low"
+    },
+    {
+      "id": "collect-network-interfaces",
+      "name": "Collect network interfaces",
+      "tactic": "discovery",
+      "technique": "T1016",
+      "command": [
+        "cat",
+        "/proc/net/dev"
+      ],
+      "description": "Read interface statistics. In the default lab this shows only loopback, evidencing that the sandbox has no network.",
+      "risk": "low",
+      "volatile_patterns": [
+        "\\b\\d+\\b"
+      ]
+    },
+    {
+      "id": "collect-installed-packages",
+      "name": "Collect installed packages",
+      "tactic": "discovery",
+      "technique": "T1518",
+      "command": [
+        "apk",
+        "info"
+      ],
+      "description": "List packages present in the isolated image.",
+      "risk": "low",
+      "produces": [
+        {
+          "trait": "host.package.name",
+          "pattern": "(?m)^([a-z0-9][a-z0-9._+-]*)$"
+        }
+      ]
+    },
+    {
+      "id": "inspect-process-status",
+      "name": "Inspect a discovered process",
+      "tactic": "discovery",
+      "technique": "T1057",
+      "command": [
+        "cat",
+        "/proc/{host.process.pid}/status"
+      ],
+      "description": "Read the status of a process discovered earlier. Cannot run until a pid is known, so it depends on the process listing.",
+      "risk": "low",
+      "requires": [
+        "host.process.pid"
+      ],
+      "volatile_patterns": [
+        "\\b\\d+ kB\\b",
+        "(?<=ctxt_switches:)\\s+\\d+"
+      ]
+    },
+    {
+      "id": "inspect-package-contents",
+      "name": "Inspect a discovered package",
+      "tactic": "discovery",
+      "technique": "T1518",
+      "command": [
+        "apk",
+        "info",
+        "-L",
+        "{host.package.name}"
+      ],
+      "description": "List the files a package installed. Cannot run until a package name is known, so it depends on the package listing.",
+      "risk": "low",
+      "requires": [
+        "host.package.name"
+      ]
+    },
+    {
+      "id": "inspect-account-identity",
+      "name": "Inspect a discovered account",
+      "tactic": "discovery",
+      "technique": "T1087.001",
+      "command": [
+        "id",
+        "{host.account.name}"
+      ],
+      "description": "Resolve the uid and groups of an account discovered earlier. Cannot run until an account name is known.",
+      "risk": "low",
+      "requires": [
+        "host.account.name"
+      ]
+    }
+  ]
+}

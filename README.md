@@ -141,6 +141,53 @@ allowlist가 거부한 ID 목록도 함께 보여줍니다.
 없는 것은 구분합니다 — 토큰 거부(401)는 즉시 `BeaconUnauthorised`로 중단하고, 서버가 에이전트를
 잊은 경우(403)는 한 번 재등록한 뒤 원래 요청을 재시도합니다.
 
+### 사실과 선행 조건
+
+능력이 서로 독립적이면 순서가 의미가 없고, planner와 RL이 풀 문제도 없습니다. 그래서 일부
+능력은 **앞선 능력이 발견한 값**이 있어야만 실행됩니다.
+
+```text
+collect-process-list       -> host.process.pid    -> inspect-process-status
+collect-installed-packages -> host.package.name   -> inspect-package-contents
+collect-account-list       -> host.account.name   -> inspect-account-identity
+```
+
+억지 의존이 아니라 실제 의존입니다. `cat /proc/<pid>/status`는 pid를 모르면 실행할 수
+없습니다. 선행 조건이 안 채워진 능력은 애초에 배정되지 않습니다.
+
+catalog는 trait의 모양을 한 번 선언하고, 능력이 그것을 생산·소비합니다.
+
+```json
+{
+  "traits": { "host.process.pid": "^[0-9]{1,7}$" },
+  "abilities": [
+    {
+      "id": "collect-process-list",
+      "command": ["ps", "-ef"],
+      "produces": [{ "trait": "host.process.pid", "pattern": "(?m)^\\S+\\s+(\\d{1,7})\\s+\\d+\\s" }]
+    },
+    {
+      "id": "inspect-process-status",
+      "command": ["cat", "/proc/{host.process.pid}/status"],
+      "requires": ["host.process.pid"]
+    }
+  ]
+}
+```
+
+**발견한 값이 argv로 들어간다는 점이 이 기능의 핵심 위험입니다.** 값은 shell 문자열이 아니라
+argv 원소 안에 치환되므로 두 번째 명령을 끼워 넣을 수는 없지만, 인자나 경로는 될 수 있습니다.
+그래서 trait 패턴은 anchor를 강제하고, 치환 시점에 값이 그 패턴에 **완전히** 일치해야 합니다.
+`../../etc/shadow`, `-rf`, `1; cat /etc/shadow` 같은 값은 거부됩니다.
+
+catalog는 로드 시점에 지킬 수 없는 의존을 거부합니다 — 선언되지 않은 trait, anchor 없는
+패턴, `requires`에 없는 placeholder, 캡처 그룹이 1개가 아닌 추출 패턴, 아무도 생산하지 않는
+required trait.
+
+beacon은 능력 ID와 이 값들을 함께 보냅니다. 명령은 여전히 전송되지 않습니다 — 에이전트가
+자기 catalog로 명령을 재구성하고, 자기 trait 패턴으로 값을 **다시** 검증합니다. 서버가
+장악돼도 이미 승인된 템플릿에 이미 허용된 모양의 값만 넣을 수 있습니다.
+
 ### 동시 실행과 RL 신용 할당
 
 state는 **완료한 능력이 아니라 배정된 능력** 집합으로 계산합니다. 순차 실행에서는 두 집합이
@@ -258,7 +305,7 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 117 passed
+pytest             -> 137 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
@@ -267,7 +314,9 @@ Docker smoke       -> 8 executions, 0 failures, loopback 외 인터페이스 없
 Beacon             -> 127.0.0.1 전용 바인드, 4/4 실행 (컨테이너는 --network none 유지)
 Multi-agent        -> 3 에이전트 동시 실행, 중복 배정 0건
 Coordinator        -> beacon 실행에서 plan/RL/reward 이벤트 생성, Q table 학습 확인
-ATT&CK coverage    -> 8 techniques (T1016/T1033/T1057/T1082/T1083/T1087.001/T1518/T1613)
+ATT&CK coverage    -> 8 techniques / 11 abilities (T1057·T1087.001·T1518은 후속 능력과 공유)
+Preconditions      -> docker 11/11 성공, gated 능력 3개 모두 부모 이후에만 실행
+Fact 추출          -> pid 1개, package 20개, account 17개 (실제 컨테이너 출력 기준)
 Timeout            -> timed-out 상태, 컨테이너 누수 0건 (수정 전: 컨테이너 계속 실행)
 RL credit          -> 4 에이전트 동시 실행 시 고유 state 2 -> 8 (순차와 동일)
 Q table 전이       -> 순차 학습 table의 동시 실행 적중률 38% -> 75%

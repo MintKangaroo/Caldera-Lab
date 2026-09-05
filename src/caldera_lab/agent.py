@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 
 from .catalog import AbilityCatalog
 from .executor import Executor
+from .facts import resolve
 from .policy import LabPolicy
 
 
@@ -93,9 +94,15 @@ class BeaconAgent:
             ability_id = instruction.get("ability_id")
             if not isinstance(ability_id, str):
                 break
-            # The wire only carries an ID; the command comes from the local
-            # catalog, and the policy still has to approve it.
-            ability = self.catalog.get(ability_id)
+            # The wire only carries an ID and values; the command comes from
+            # the local catalog, and the policy still has to approve it.
+            raw = instruction.get("bindings")
+            bindings = {
+                str(trait): str(value)
+                for trait, value in (raw or {}).items()
+                if isinstance(raw, dict)
+            }
+            ability = resolve(self.catalog, self.catalog.get(ability_id), bindings)
             self.policy.validate(self.catalog, ability_id, len(executed))
             result = self.executor.execute(ability, self.policy)
             self._post(

@@ -8,10 +8,24 @@ from pathlib import Path
 from .catalog import AbilityCatalog
 from .clock import now
 from .executor import SUCCESS_STATUSES, ExecutionResult
+from .facts import FactStore, bind, extract
 from .planner import LLMPlanner, Plan, RulePlanner
 from .policy import LabPolicy
 from .reward import RewardModel
 from .rl import CLEAN, DEGRADED, QPolicy
+
+
+@dataclass(frozen=True)
+class Assignment:
+    """What an agent is told to run: an ability id and the values it needs.
+
+    The command itself never travels. The agent rebuilds it from its own
+    catalog and re-validates every value against its own trait patterns, so a
+    binding cannot introduce anything the catalog does not already allow.
+    """
+
+    ability_id: str
+    bindings: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -72,6 +86,8 @@ class Coordinator:
         self._issued = 0
         self._pending: dict[str, tuple[str, str]] = {}
         self._started = False
+        # Facts unlock abilities, which is what makes the order of a run matter.
+        self.facts = FactStore()
 
     def _scarce_for_others(self, agent_id: str, candidates: tuple[str, ...]) -> set[str]:
         """Abilities another declared agent has almost no alternative to.
@@ -129,6 +145,10 @@ class Coordinator:
                 },
             )
 
+    def _available(self, ability_id: str) -> bool:
+        """Whether the facts discovered so far unlock this ability."""
+        return self.facts.satisfies(self.catalog.get(ability_id))
+
     def _candidates(self) -> tuple[str, ...]:
         plan: Plan = self._plan
         candidates = tuple(
@@ -141,9 +161,15 @@ class Coordinator:
         if not candidates:
             self._used.clear()
             candidates = self.catalog.ids()
-        return candidates
+        # Applied last so it can never be bypassed by a fallback: an ability
+        # whose preconditions are unmet has no command to run.
+        return tuple(item for item in candidates if self._available(item))
 
     def next_ability(self, agent_id: str = "local") -> str | None:
+        assignment = self.next_assignment(agent_id)
+        return assignment.ability_id if assignment else None
+
+    def next_assignment(self, agent_id: str = "local") -> Assignment | None:
         """Hand out the next ability, or None when the budget is spent.
 
         Safe to call from several agent threads: selection, the used set, and
@@ -196,6 +222,7 @@ class Coordinator:
             self._issued += 1
             self._pending[f"{agent_id}:{ability_id}"] = (state, ability_id)
             ability = self.catalog.get(ability_id)
+            bindings = bind(ability, self.facts)
             self._emit(
                 "ability.approved",
                 {
@@ -204,9 +231,10 @@ class Coordinator:
                     "ability_id": ability.id,
                     "technique": ability.technique,
                     "policy": "agent" if agent_id in self.agent_policies else "lab",
+                    "bindings": dict(bindings),
                 },
             )
-            return ability_id
+            return Assignment(ability_id, bindings)
 
     def record_result(self, result: ExecutionResult, agent_id: str = "local") -> None:
         """Score a result, update the policy, and replan for what is left."""
@@ -225,6 +253,27 @@ class Coordinator:
                 *self._observations,
                 f"{ability_id}:{result.status}:{result.return_code}",
             )
+            discovered = [
+                fact
+                for fact in extract(self.catalog, ability, result.stdout)
+                if self.facts.add(fact)
+            ]
+            if discovered:
+                unlocked = sorted(
+                    item
+                    for item in self.catalog.ids()
+                    if item not in self._used and self._available(item)
+                    and self.catalog.get(item).requires
+                )
+                self._emit(
+                    "facts.discovered",
+                    {
+                        "agent_id": agent_id,
+                        "ability_id": ability_id,
+                        "facts": [{"trait": f.trait, "value": f.value} for f in discovered],
+                        "unlocked": unlocked,
+                    },
+                )
             breakdown = self.reward_model.score(result, self.policy_for(agent_id), ability)
             self._emit(
                 "reward.scored",

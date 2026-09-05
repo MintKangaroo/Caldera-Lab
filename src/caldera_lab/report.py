@@ -196,9 +196,11 @@ def render(catalog: AbilityCatalog, runs: dict[str, RunSummary]) -> str:
         lines.append(
             f"{row['technique']:<12}{row['tactic']:<12}{row['successes']:>10}{mark} {row['name']}"
         )
-    uncovered = [row for row in coverage(catalog, runs) if not row["successes"]]
-    if uncovered:
-        lines.append(f"({len(uncovered)} technique(s) never executed successfully, marked !)")
+    covered, declared = technique_coverage(coverage(catalog, runs))
+    if covered < declared:
+        lines.append(
+            f"({declared - covered} technique(s) never executed successfully, marked !)"
+        )
 
     lines.append("")
     lines.append("runs")
@@ -219,6 +221,18 @@ def _counter_line(counter: Counter[str]) -> str:
 STATUS_SCHEMA = "lab-status/1"
 
 
+def technique_coverage(rows: list[dict[str, object]]) -> tuple[int, int]:
+    """Distinct techniques covered, out of distinct techniques declared.
+
+    Several abilities can share a technique -- a follow-up that inspects what
+    its parent discovered is the same technique -- so counting rows would
+    report ability coverage under a technique label.
+    """
+    declared = {str(row["technique"]) for row in rows}
+    covered = {str(row["technique"]) for row in rows if row["successes"]}
+    return len(covered), len(declared)
+
+
 def status_document(catalog: AbilityCatalog, runs: dict[str, RunSummary]) -> dict[str, object]:
     """Summarise runs as the generic status contract a control room can render.
 
@@ -227,7 +241,7 @@ def status_document(catalog: AbilityCatalog, runs: dict[str, RunSummary]) -> dic
     sources, isolation -- is resolved here and flattened into strings.
     """
     rows = coverage(catalog, runs)
-    covered = sum(1 for row in rows if row["successes"])
+    covered, declared = technique_coverage(rows)
     executions = sum(summary.executions for summary in runs.values())
     failures = sum(sum(summary.failed.values()) for summary in runs.values())
 
@@ -243,20 +257,20 @@ def status_document(catalog: AbilityCatalog, runs: dict[str, RunSummary]) -> dic
 
     if not runs:
         state, headline = "unknown", "no runs recorded"
-    elif failures or covered < len(rows):
+    elif failures or covered < declared:
         state = "warn"
-        headline = f"{covered}/{len(rows)} techniques covered"
+        headline = f"{covered}/{declared} techniques covered"
         if failures:
             headline += f", {failures} failed"
     else:
         state = "ok"
-        headline = f"{covered}/{len(rows)} techniques covered"
+        headline = f"{covered}/{declared} techniques covered"
 
     metrics = [
         {"label": "runs", "value": str(len(runs))},
         {"label": "executions", "value": str(executions)},
         {"label": "failed", "value": str(failures)},
-        {"label": "ATT&CK coverage", "value": f"{covered}/{len(rows)}"},
+        {"label": "ATT&CK coverage", "value": f"{covered}/{declared}"},
         {"label": "isolation", "value": _counter_line(isolations) or "none"},
         {"label": "planner", "value": _counter_line(sources) or "none"},
         {"label": "information gain", "value": f"{gain:.2f}"},

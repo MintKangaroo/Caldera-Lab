@@ -15,6 +15,16 @@ EXPECTED = {
     "collect-container-context",
     "collect-network-interfaces",
     "collect-installed-packages",
+    "inspect-process-status",
+    "inspect-package-contents",
+    "inspect-account-identity",
+}
+
+# Each gated ability and the ability whose output unlocks it.
+DEPENDENCIES = {
+    "inspect-process-status": "collect-process-list",
+    "inspect-package-contents": "collect-installed-packages",
+    "inspect-account-identity": "collect-account-list",
 }
 
 
@@ -41,6 +51,21 @@ def main(path: Path) -> int:
 
     if not any(r["event"] == "reward.scored" for r in records):
         failures.append("no reward was scored")
+
+    # A gated ability that ran before the ability supplying its facts would mean
+    # the precondition was not enforced -- it would have run on a stale or
+    # invented value rather than a discovered one.
+    order = [r["details"]["ability_id"] for r in completed]
+    for gated, source in DEPENDENCIES.items():
+        if gated not in order:
+            failures.append(f"{gated} never ran, so its dependency was not exercised")
+        elif source not in order or order.index(source) > order.index(gated):
+            failures.append(f"{gated} ran before {source} supplied its facts")
+    approved = [r for r in records if r["event"] == "ability.approved"]
+    for record in approved:
+        details = record["details"]
+        if details["ability_id"] in DEPENDENCIES and not details.get("bindings"):
+            failures.append(f"{details['ability_id']} was approved with no discovered value")
 
     # The sandbox claims to have no network. /proc/net/dev is the evidence:
     # anything beyond loopback means the isolation regressed.

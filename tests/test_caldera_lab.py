@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import subprocess
 import threading
 import urllib.error
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -24,6 +26,7 @@ from caldera_lab.executor import (
     ExecutionResult,
     LocalLabExecutor,
 )
+from caldera_lab.facts import FactRejected, extract, resolve
 from caldera_lab.orchestrator import Orchestrator
 from caldera_lab.planner import LLMPlanner, RulePlanner
 from caldera_lab.policy import LabPolicy
@@ -34,6 +37,7 @@ from caldera_lab.report import (
     render,
     status_document,
     summarize,
+    technique_coverage,
 )
 from caldera_lab.reward import RewardModel
 from caldera_lab.rl import Q_TABLE_VERSION, QPolicy
@@ -56,6 +60,9 @@ def test_catalog_is_allowlisted(catalog: AbilityCatalog) -> None:
         "collect-container-context",
         "collect-network-interfaces",
         "collect-installed-packages",
+        "inspect-process-status",
+        "inspect-package-contents",
+        "inspect-account-identity",
     )
     with pytest.raises(KeyError):
         catalog.get("arbitrary-shell-command")
@@ -252,7 +259,7 @@ def test_state_is_bounded_and_revisited(catalog: AbilityCatalog) -> None:
     forward = policy.state(("collect-host-identity:succeeded:0", "collect-system-info:succeeded:0"))
     reverse = policy.state(("collect-system-info:succeeded:0", "collect-host-identity:succeeded:0"))
     assert forward == reverse
-    assert forward == "11000000|clean"
+    assert forward == "11" + "0" * (len(catalog.ids()) - 2) + "|clean"
     # A failure is a different state than a success over the same set.
     assert policy.state(("collect-host-identity:failed:1",)) != policy.state(
         ("collect-host-identity:succeeded:0",)
@@ -712,12 +719,17 @@ def test_report_json_keeps_counter_keys_intact(catalog: AbilityCatalog, tmp_path
 
 @pytest.fixture
 def beacon(catalog: AbilityCatalog):
-    state = BeaconState(catalog, queue=catalog.ids())
+    state = BeaconState(catalog, queue=_ungated(catalog))
     server = BeaconServer(state).start()
     try:
         yield server, state
     finally:
         server.stop()
+
+
+def _ungated(catalog: AbilityCatalog) -> tuple[str, ...]:
+    """Abilities a fixed queue can serve: the ones needing no discovered facts."""
+    return tuple(a.id for a in catalog.all() if not a.requires)
 
 
 def _raw_post(
@@ -761,9 +773,14 @@ def test_beacon_never_sends_a_command(beacon) -> None:
     _raw_post(server.url, "/register", {"agent_id": "a"}, server.token)
     status, body = _raw_post(server.url, "/beacon", {"agent_id": "a"}, server.token)
     assert status == 200
-    # The wire carries an ability ID and nothing else executable.
-    assert set(body) == {"ability_id"}
+    # The wire carries an ability ID and discovered values, never a command.
+    assert set(body) == {"ability_id", "bindings"}
     assert body["ability_id"] in set(server.state.catalog.ids())
+    catalog = server.state.catalog
+    for trait, value in body["bindings"].items():
+        # Every value has to fit the shape its trait declares, so a binding
+        # cannot smuggle in an argument the catalog would not allow.
+        assert re.fullmatch(catalog.trait_pattern(trait), value)
 
 
 def test_beacon_queue_rejects_an_ability_outside_the_catalog(catalog: AbilityCatalog) -> None:
@@ -816,16 +833,16 @@ def test_agent_completes_the_beacon_cycle(beacon, catalog: AbilityCatalog) -> No
     server, state = beacon
     agent = BeaconAgent(catalog, DryRunExecutor(), server.url, server.token, LabPolicy())
     executed = agent.run()
-    assert executed == list(catalog.ids())
+    assert executed == list(_ungated(catalog))
     record = state.agents[agent.agent_id]
-    assert len(record.results) == len(catalog.ids())
-    assert {result["ability_id"] for result in record.results} == set(catalog.ids())
+    assert len(record.results) == len(_ungated(catalog))
+    assert {result["ability_id"] for result in record.results} == set(_ungated(catalog))
 
 
 def test_agent_stops_when_the_queue_is_empty(beacon, catalog: AbilityCatalog) -> None:
     server, _ = beacon
     agent = BeaconAgent(catalog, DryRunExecutor(), server.url, server.token, LabPolicy())
-    assert len(agent.run(max_beacons=64)) == len(catalog.ids())
+    assert len(agent.run(max_beacons=64)) == len(_ungated(catalog))
 
 
 def test_agent_still_applies_the_local_policy(catalog: AbilityCatalog) -> None:
@@ -876,7 +893,7 @@ def test_beacon_does_not_block_on_an_idle_keepalive_connection(beacon) -> None:
 
 
 def test_concurrent_agents_never_receive_the_same_ability(catalog: AbilityCatalog) -> None:
-    state = BeaconState(catalog, queue=catalog.ids())
+    state = BeaconState(catalog, queue=_ungated(catalog))
     server = BeaconServer(state).start()
     try:
         agents = [
@@ -894,7 +911,7 @@ def test_concurrent_agents_never_receive_the_same_ability(catalog: AbilityCatalo
             thread.join(timeout=20)
         assert all(not thread.is_alive() for thread in threads)
         assigned = [ability for run in executed for ability in run]
-        assert sorted(assigned) == sorted(catalog.ids())
+        assert sorted(assigned) == sorted(_ungated(catalog))
         assert len(assigned) == len(set(assigned))
     finally:
         server.stop()
@@ -1105,15 +1122,22 @@ def test_no_ability_reads_a_credential_store(catalog: AbilityCatalog) -> None:
             assert needle not in joined, f"{ability.id} touches {needle}"
 
 
-def test_techniques_are_unique_so_coverage_is_meaningful(catalog: AbilityCatalog) -> None:
+def test_coverage_counts_techniques_not_abilities(catalog: AbilityCatalog) -> None:
+    # A follow-up that inspects what its parent found is the same technique, so
+    # abilities and techniques are no longer one to one and counting rows would
+    # report ability coverage under a technique label.
     techniques = [ability.technique for ability in catalog.all()]
-    assert len(techniques) == len(set(techniques))
+    assert len(techniques) > len(set(techniques))
+    rows = [{"technique": technique, "successes": 0} for technique in techniques]
+    assert technique_coverage(rows) == (0, len(set(techniques)))
+    rows[0]["successes"] = 1
+    assert technique_coverage(rows) == (1, len(set(techniques)))
 
 
 def test_every_ability_id_is_unique_and_stable(catalog: AbilityCatalog) -> None:
     # AbilityCatalog stores by id, so a duplicate would silently drop an entry.
     raw = json.loads((ROOT / "catalog" / "abilities.json").read_text(encoding="utf-8"))
-    ids = [entry["id"] for entry in raw]
+    ids = [entry["id"] for entry in raw["abilities"]]
     assert len(ids) == len(set(ids)) == len(catalog.ids())
 
 
@@ -1322,14 +1346,16 @@ def test_an_agent_with_alternatives_yields_a_scarce_ability(catalog: AbilityCata
 def test_reservation_is_a_preference_not_a_deadlock(catalog: AbilityCatalog) -> None:
     # If the restricted agent never beacons, the reserved ability must still be
     # handed out rather than stalling the run at the end.
-    only = catalog.ids()[0]
+    available = _ungated(catalog)
+    only = available[0]
     coordinator = Coordinator(
         catalog,
         planner_mode="rules",
-        max_steps=len(catalog.ids()),
+        max_steps=len(available),
         agent_policies={"absent": LabPolicy(approved_abilities=frozenset({only}))},
     )
-    handed = [coordinator.next_ability("open") for _ in range(len(catalog.ids()))]
+    # Nothing has reported, so only the abilities needing no facts are on offer.
+    handed = [coordinator.next_ability("open") for _ in range(len(available))]
     assert None not in handed
     assert handed[-1] == only  # taken last, but taken
 
@@ -1457,7 +1483,8 @@ def test_status_document_is_ok_only_with_full_coverage(
     )
     document = status_document(catalog, summarize(load_events(log)))
     assert document["state"] == "ok"
-    assert document["headline"] == f"{len(catalog.ids())}/{len(catalog.ids())} techniques covered"
+    techniques = len({ability.technique for ability in catalog.all()})
+    assert document["headline"] == f"{techniques}/{techniques} techniques covered"
 
 
 def test_report_status_writes_the_document_instead_of_the_table(tmp_path: Path, capsys) -> None:
@@ -1562,3 +1589,205 @@ def test_a_table_from_the_previous_state_layout_is_refused(
     )
     assert policy.load(path) is False
     assert policy.q == {}
+
+
+def _catalog_from(document: object, tmp_path: Path) -> AbilityCatalog:
+    path = tmp_path / "abilities.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return AbilityCatalog.from_json(path)
+
+
+def _minimal(**overrides: object) -> dict[str, object]:
+    ability = {
+        "id": "probe",
+        "name": "Probe",
+        "tactic": "discovery",
+        "technique": "T0001",
+        "command": ["cat", "/proc/{host.process.pid}/status"],
+        "description": "d",
+        "requires": ["host.process.pid"],
+    }
+    ability.update(overrides)
+    return ability
+
+
+def _producer(**overrides: object) -> dict[str, object]:
+    ability = {
+        "id": "lister",
+        "name": "Lister",
+        "tactic": "discovery",
+        "technique": "T0002",
+        "command": ["ps"],
+        "description": "d",
+        "produces": [{"trait": "host.process.pid", "pattern": "(?m)^(\\d+)$"}],
+    }
+    ability.update(overrides)
+    return ability
+
+
+PID_TRAITS = {"host.process.pid": "^[0-9]{1,7}$"}
+
+
+def test_a_gated_ability_is_not_offered_before_its_facts_exist(
+    catalog: AbilityCatalog,
+) -> None:
+    coordinator = Coordinator(catalog, planner_mode="rules", max_steps=len(catalog.ids()))
+    gated = [a.id for a in catalog.all() if a.requires]
+    assert gated
+    handed = []
+    while (ability_id := coordinator.next_ability()) is not None:
+        handed.append(ability_id)
+    # Nothing has reported, so no facts exist and every gated ability is held back.
+    assert not set(handed) & set(gated)
+
+
+def test_a_fact_unlocks_the_ability_that_depends_on_it(catalog: AbilityCatalog) -> None:
+    coordinator = Coordinator(catalog, planner_mode="rules", max_steps=len(catalog.ids()))
+    coordinator.start()
+    assert not coordinator._available("inspect-process-status")
+    coordinator.record_result(
+        ExecutionResult(
+            "collect-process-list",
+            "succeeded",
+            "UID PID PPID\nnobody 1 0 x\n",
+            "",
+            0,
+            "dry-run",
+            0.1,
+        )
+    )
+    assert coordinator.facts.values("host.process.pid") == ("1",)
+    assert coordinator._available("inspect-process-status")
+
+
+def test_a_binding_is_substituted_into_argv_not_into_a_shell(catalog: AbilityCatalog) -> None:
+    ability = catalog.get("inspect-process-status")
+    resolved = resolve(catalog, ability, {"host.process.pid": "1"})
+    assert resolved.command == ("cat", "/proc/1/status")
+    # The template is untouched; resolution produces a new ability.
+    assert ability.command == ("cat", "/proc/{host.process.pid}/status")
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["../../etc/shadow", "1/../../root", "1; cat /etc/shadow", "-rf", "1 2", "", "self"],
+)
+def test_a_value_that_does_not_fit_its_trait_is_refused(
+    catalog: AbilityCatalog, value: str
+) -> None:
+    """The value lands inside an argv element, so its shape is the boundary."""
+    with pytest.raises(FactRejected):
+        resolve(catalog, catalog.get("inspect-process-status"), {"host.process.pid": value})
+
+
+def test_resolution_refuses_a_binding_the_ability_never_asked_for(tmp_path: Path) -> None:
+    catalog = _catalog_from(
+        {
+            "traits": {**PID_TRAITS, "host.other": "^[a-z]+$"},
+            "abilities": [_producer(), _minimal()],
+        },
+        tmp_path,
+    )
+    ability = catalog.get("probe")
+    swapped = replace(ability, command=("cat", "{host.other}"))
+    with pytest.raises(FactRejected):
+        resolve(catalog, swapped, {"host.other": "x"})
+
+
+def test_resolution_refuses_a_missing_binding(catalog: AbilityCatalog) -> None:
+    with pytest.raises(FactRejected):
+        resolve(catalog, catalog.get("inspect-process-status"), {})
+
+
+def test_extraction_drops_a_capture_that_does_not_fit_the_trait(tmp_path: Path) -> None:
+    catalog = _catalog_from(
+        {
+            "traits": PID_TRAITS,
+            "abilities": [
+                _producer(produces=[{"trait": "host.process.pid", "pattern": "(?m)^(.+)$"}]),
+                _minimal(),
+            ],
+        },
+        tmp_path,
+    )
+    facts = extract(catalog, catalog.get("lister"), "12\n../../etc/shadow\n99999999999\n7\n")
+    assert [fact.value for fact in facts] == ["12", "7"]
+
+
+def test_the_agent_refuses_a_value_the_server_made_up(catalog: AbilityCatalog) -> None:
+    """A compromised beacon can name an approved ability but not widen its argv."""
+    agent = BeaconAgent(
+        catalog, DryRunExecutor(), "http://127.0.0.1:1", "t", LabPolicy(), agent_id="a"
+    )
+    def hostile(path: str, payload: dict[str, object], **_: object) -> dict[str, object]:
+        if path != "/beacon":
+            return {}
+        return {
+            "ability_id": "inspect-process-status",
+            "bindings": {"host.process.pid": "../../.."},
+        }
+
+    with (
+        mock.patch.object(agent, "_post", side_effect=hostile),
+        pytest.raises(FactRejected),
+    ):
+        agent.run(max_beacons=2)
+
+
+def test_a_fixed_queue_cannot_serve_an_ability_that_needs_facts(
+    catalog: AbilityCatalog,
+) -> None:
+    with pytest.raises(BeaconRefused):
+        BeaconState(catalog, queue=("inspect-process-status",))
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        ({"traits": {}, "abilities": [_minimal()]}, "undeclared trait"),
+        (
+            {"traits": {"host.process.pid": "[0-9]+"}, "abilities": [_producer(), _minimal()]},
+            "anchored",
+        ),
+        (
+            {"traits": PID_TRAITS, "abilities": [_producer(), _minimal(requires=[])]},
+            "without requiring it",
+        ),
+        (
+            {
+                "traits": PID_TRAITS,
+                "abilities": [
+                    _producer(produces=[{"trait": "host.process.pid", "pattern": "^(a)(b)$"}]),
+                    _minimal(),
+                ],
+            },
+            "one capturing group",
+        ),
+        ({"traits": PID_TRAITS, "abilities": [_minimal()]}, "No ability produces"),
+    ],
+)
+def test_the_catalog_refuses_a_dependency_it_cannot_honour(
+    tmp_path: Path, document: object, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _catalog_from(document, tmp_path)
+
+
+def test_one_agents_discovery_unlocks_work_for_another(catalog: AbilityCatalog) -> None:
+    """Facts live in the coordinator, not in an agent, so a run is a shared
+    investigation rather than several isolated ones."""
+    coordinator = Coordinator(catalog, planner_mode="rules", max_steps=len(catalog.ids()))
+    coordinator.start()
+    coordinator.record_result(
+        ExecutionResult(
+            "collect-process-list", "succeeded", "UID PID\nnobody 42 0 x\n", "", 0, "dry-run", 0.1
+        ),
+        agent_id="finder",
+    )
+    handed: list[str] = []
+    while (assignment := coordinator.next_assignment("other")) is not None:
+        handed.append(assignment.ability_id)
+        if assignment.ability_id == "inspect-process-status":
+            assert assignment.bindings == {"host.process.pid": "42"}
+            return
+    raise AssertionError(f"the second agent was never offered the unlocked ability: {handed}")

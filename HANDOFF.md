@@ -205,7 +205,12 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
    실패 여부"(`clean`/`degraded`)로 바꿔 두 모드가 같은 key를 씁니다. 적중률 38% -> 75%
    (남은 차이는 탐험 경로 분기). `Q_TABLE_VERSION` 2로 상승, 버전 1 table은 거부됩니다.
 
-8. **LICENSE 미정**: 아직 없습니다. 공개 저장소이므로 선택이 필요합니다.
+8. ~~**능력 선행 조건**~~: 완료. catalog가 trait을 선언하고, 능력이 `produces`/`requires`로
+   의존을 표현합니다. 발견한 값은 argv 원소에 치환되며 anchor된 trait 패턴에 완전히
+   일치해야 합니다. 11개 능력 / 8개 technique. beacon은 ID와 값만 전달하고 에이전트가
+   자기 catalog로 재검증합니다. `LabPolicy.max_steps` 기본값 8 -> 12.
+
+9. **LICENSE 미정**: 아직 없습니다. 공개 저장소이므로 선택이 필요합니다.
 
 ## 7. 시작 전 확인 명령
 

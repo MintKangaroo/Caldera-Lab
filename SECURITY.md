@@ -21,6 +21,16 @@ that weakens one as a security change, not a refactor.
 
 - Abilities are declared as argv arrays in `catalog/abilities.json`. Arbitrary
   shell strings are never accepted, from a user or from a model.
+- An ability may need a value discovered earlier (a pid, a package name). The
+  value is substituted into an argv element, never into a shell string, and
+  only after it matches the anchored pattern its trait declares in the
+  catalog. An unknown trait, a missing binding, or a value that does not match
+  is refused rather than passed through. This is the boundary that keeps a
+  discovered string from becoming an argument the catalog never allowed.
+- The beacon protocol carries an ability ID and those values, never a command.
+  The agent rebuilds the command from its own catalog and re-validates every
+  value against its own trait pattern, so a compromised server can only replay
+  an already-approved template with an already-allowed value shape.
 - The LLM planner may only return catalog IDs. The response schema constrains
   it, and `LLMPlanner._request` re-validates locally because the endpoint is
   operator-configurable. Rejected IDs are recorded, not discarded silently.
@@ -65,17 +75,25 @@ that weakens one as a security change, not a refactor.
 
 Every new ability needs, in the same change: a catalog entry, a policy review
 of its risk level and network requirement, a negative test, and a Docker
-execution check in CI. Anything that writes, persists, or reaches the network
+execution check in CI. An ability that takes a discovered value additionally
+needs its trait declared in `traits` with an anchored pattern, and a test that
+a value outside that pattern is refused. Anything that writes, persists, or reaches the network
 is out of scope for this repository.
 
 The scope is enforced, not merely stated. The test suite rejects a catalog
 entry whose command writes, reaches the network, spawns a shell, contains a
 shell metacharacter, or names a credential store (`/etc/shadow`, `.ssh`,
-`id_rsa`, `.aws`, `.netrc`, `/proc/kcore`). Techniques must be unique so
-coverage reporting stays meaningful, and the catalog must fit the default step
-budget so a full sweep is not silently truncated.
+`id_rsa`, `.aws`, `.netrc`, `/proc/kcore`). The catalog must fit the default
+step budget so a full sweep is not silently truncated, and it is refused at
+load time if it declares a dependency it cannot honour: an undeclared trait,
+an unanchored trait pattern, a placeholder the ability does not require, an
+extraction pattern without exactly one capturing group, or a required trait no
+ability produces.
 
-CI additionally reads `/proc/net/dev` from inside the sandbox and fails if any
+CI additionally asserts that every gated ability ran after the ability that
+supplied its facts and was approved with a real binding, so a precondition
+cannot quietly stop being enforced. It reads `/proc/net/dev` from inside the
+sandbox and fails if any
 interface beyond loopback appears, so the no-network claim is checked against
 the running container rather than trusted.
 

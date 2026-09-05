@@ -7,6 +7,7 @@ from pathlib import Path
 from .catalog import AbilityCatalog
 from .coordinator import Coordinator, Event, now
 from .executor import Executor
+from .facts import resolve
 from .policy import LabPolicy
 from .reward import RewardModel
 
@@ -64,10 +65,15 @@ class Orchestrator:
         self.coordinator.limit = min(steps, self.policy.max_steps)
         self.coordinator.start()
         while True:
-            ability_id = self.coordinator.next_ability()
-            if ability_id is None:
+            assignment = self.coordinator.next_assignment()
+            if assignment is None:
                 break
-            result = self.executor.execute(self.catalog.get(ability_id), self.policy)
+            ability = resolve(
+                self.catalog,
+                self.catalog.get(assignment.ability_id),
+                assignment.bindings,
+            )
+            result = self.executor.execute(ability, self.policy)
             self.coordinator.record_result(result)
         events = self.coordinator.finish()
         write_events(events, log_path)

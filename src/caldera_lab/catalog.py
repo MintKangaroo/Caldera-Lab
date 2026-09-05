@@ -5,6 +5,16 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
+
+
+@dataclass(frozen=True)
+class FactPattern:
+    """How one ability's output yields one trait. The group is the value."""
+
+    trait: str
+    pattern: str
+
 
 @dataclass(frozen=True)
 class Ability:
@@ -22,17 +32,56 @@ class Ability:
     Declared per ability rather than inferred, because a global heuristic that
     blanked every number would also erase real findings such as a uid.
     """
+    requires: tuple[str, ...] = ()
+    """Traits that must already be known. An ability whose traits are unknown is
+    never issued, which is what makes the order of a run matter at all."""
+    produces: tuple[FactPattern, ...] = ()
 
 
 class AbilityCatalog:
-    def __init__(self, abilities: tuple[Ability, ...]) -> None:
+    def __init__(
+        self, abilities: tuple[Ability, ...], traits: dict[str, str] | None = None
+    ) -> None:
         self._abilities = {ability.id: ability for ability in abilities}
+        # A trait's shape is declared once for the whole catalog, not per
+        # producing ability, so every producer and every consumer of a value
+        # agrees on what that value may contain.
+        self._traits = dict(traits or {})
+
+    def trait_pattern(self, trait: str) -> str:
+        try:
+            return self._traits[trait]
+        except KeyError as exc:
+            raise KeyError(f"Trait is not declared: {trait}") from exc
+
+    def traits(self) -> dict[str, str]:
+        return dict(self._traits)
 
     @classmethod
     def from_json(cls, path: Path) -> AbilityCatalog:
         raw = json.loads(path.read_text(encoding="utf-8"))
+        # A bare list is a catalog with no traits, which is every catalog that
+        # existed before abilities could depend on each other.
+        if isinstance(raw, dict):
+            traits = raw.get("traits", {})
+            raw = raw.get("abilities")
+        else:
+            traits = {}
         if not isinstance(raw, list):
-            raise ValueError("Ability catalog must be a list")
+            raise ValueError("Ability catalog must be a list of abilities")
+        if not isinstance(traits, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in traits.items()
+        ):
+            raise ValueError("traits must map a trait name to a pattern")
+        for trait, pattern in traits.items():
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(f"Invalid pattern for trait {trait}: {exc}") from exc
+            # An unanchored trait pattern would accept a value with anything
+            # appended, which is the whole point of declaring the shape.
+            if not (pattern.startswith("^") and pattern.endswith("$")):
+                raise ValueError(f"Trait pattern must be anchored: {trait}")
         abilities: list[Ability] = []
         for item in raw:
             if not isinstance(item, dict):
@@ -58,6 +107,17 @@ class AbilityCatalog:
                     raise ValueError(
                         f"Invalid volatile_patterns regex for {item['id']}: {exc}"
                     ) from exc
+            requires = tuple(_string_list(item, "requires"))
+            produces = _fact_patterns(item)
+            for trait in (*requires, *(producer.trait for producer in produces)):
+                if trait not in traits:
+                    raise ValueError(f"{item['id']} uses an undeclared trait: {trait}")
+            for part in command:
+                for trait in PLACEHOLDER.findall(part):
+                    if trait not in requires:
+                        raise ValueError(
+                            f"{item['id']} substitutes {trait} without requiring it"
+                        )
             abilities.append(
                 Ability(
                     id=item["id"],
@@ -69,9 +129,27 @@ class AbilityCatalog:
                     risk=item.get("risk", "low"),
                     requires_network=bool(item.get("requires_network", False)),
                     volatile_patterns=tuple(patterns),
+                    requires=requires,
+                    produces=produces,
                 )
             )
-        return cls(tuple(abilities))
+        catalog = cls(tuple(abilities), traits)
+        catalog._reject_unreachable()
+        return catalog
+
+    def _reject_unreachable(self) -> None:
+        """Refuse a catalog where an ability can never become available.
+
+        A required trait nothing produces is a catalog bug that would otherwise
+        show up as an ability that silently never runs.
+        """
+        produced = {
+            producer.trait for ability in self._abilities.values() for producer in ability.produces
+        }
+        for ability in self._abilities.values():
+            missing = sorted(set(ability.requires) - produced)
+            if missing:
+                raise ValueError(f"No ability produces {', '.join(missing)} for {ability.id}")
 
     def get(self, ability_id: str) -> Ability:
         try:
@@ -84,3 +162,34 @@ class AbilityCatalog:
 
     def ids(self) -> tuple[str, ...]:
         return tuple(self._abilities)
+
+
+def _string_list(item: dict[str, object], key: str) -> list[str]:
+    value = item.get(key, [])
+    if not isinstance(value, list) or not all(isinstance(x, str) and x for x in value):
+        raise ValueError(f"{key} must be an array of strings: {item.get('id')}")
+    return value
+
+
+def _fact_patterns(item: dict[str, object]) -> tuple[FactPattern, ...]:
+    raw = item.get("produces", [])
+    if not isinstance(raw, list):
+        raise ValueError(f"produces must be an array: {item.get('id')}")
+    patterns: list[FactPattern] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise ValueError(f"produces entry must be an object: {item.get('id')}")
+        trait, pattern = entry.get("trait"), entry.get("pattern")
+        if not isinstance(trait, str) or not isinstance(pattern, str) or not trait or not pattern:
+            raise ValueError(f"produces entry needs a trait and a pattern: {item.get('id')}")
+        try:
+            compiled = re.compile(pattern)
+        except re.error as exc:
+            raise ValueError(f"Invalid produces pattern for {item.get('id')}: {exc}") from exc
+        # Exactly one group, because the group is the value.
+        if compiled.groups != 1:
+            raise ValueError(
+                f"produces pattern for {item.get('id')} must have one capturing group"
+            )
+        patterns.append(FactPattern(trait=trait, pattern=pattern))
+    return tuple(patterns)
