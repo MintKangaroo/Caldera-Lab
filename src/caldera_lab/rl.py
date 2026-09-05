@@ -26,12 +26,19 @@ class QPolicy:
         epsilon: float = 0.15,
         alpha: float = 0.2,
         gamma: float = 0.85,
+        optimism: float = 2.0,
     ) -> None:
         self.catalog = catalog
         self.random = random.Random(seed)
         self.epsilon = epsilon
         self.alpha = alpha
         self.gamma = gamma
+        # Every reward here is positive, so a table initialised at zero makes an
+        # untried action look strictly worse than one already tried: whatever
+        # the first tie-break picked would be confirmed forever and a better
+        # order could never be found. An unseen pair is therefore worth more
+        # than a measured one until it has been measured.
+        self.optimism = optimism
         self.q: dict[tuple[str, str], float] = {}
 
     def state_from(self, committed: frozenset[str] | set[str], outcome: str) -> str:
@@ -78,16 +85,32 @@ class QPolicy:
             raise ValueError("No candidate abilities")
         if self.random.random() < self.epsilon:
             return self.random.choice(candidates)
-        best = max(self.q.get((state, item), 0.0) for item in candidates)
-        # Ties are broken by catalog order so a run is reproducible for a given seed.
-        return next(item for item in candidates if self.q.get((state, item), 0.0) == best)
+        best = max(self.value(state, item) for item in candidates)
+        # Ties are broken by candidate order so a run is reproducible for a given seed.
+        return next(item for item in candidates if self.value(state, item) == best)
 
-    def update(self, state: str, action: str, reward: float, next_state: str) -> None:
-        future = max(
-            (self.q.get((next_state, item), 0.0) for item in self.catalog.ids()),
-            default=0.0,
-        )
-        old = self.q.get((state, action), 0.0)
+    def value(self, state: str, action: str) -> float:
+        return self.q.get((state, action), self.optimism)
+
+    def update(
+        self,
+        state: str,
+        action: str,
+        reward: float,
+        next_state: str,
+        next_actions: tuple[str, ...] | None = None,
+    ) -> None:
+        """Back up the value of `state` from what is reachable after it.
+
+        The future term is a max over the actions actually available next, not
+        over the whole catalog. Over the whole catalog it is blind to an action
+        that opened options: unlocking changes which actions exist, and a max
+        that ignores availability values a state that unlocked three abilities
+        exactly like one that unlocked none.
+        """
+        reachable = self.catalog.ids() if next_actions is None else next_actions
+        future = max((self.value(next_state, item) for item in reachable), default=0.0)
+        old = self.value(state, action)
         self.q[(state, action)] = old + self.alpha * (reward + self.gamma * future - old)
 
     def fingerprint(self) -> str:

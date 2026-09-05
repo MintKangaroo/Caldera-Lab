@@ -150,19 +150,32 @@ class Coordinator:
         return self.facts.satisfies(self.catalog.get(ability_id))
 
     def _candidates(self) -> tuple[str, ...]:
+        """Everything that could run now, with the plan's suggestions first.
+
+        The plan orders the choice; it does not bound it. Treating it as the
+        only source made it an exclusive whitelist: the rule planner proposes a
+        fixed catalog prefix that shrinks as the budget is spent, so work
+        unlocked mid-run was never offered and the policy was often left with a
+        single option. Ordering still gives the planner its say, because equal
+        Q values are broken by candidate order.
+        """
         plan: Plan = self._plan
-        candidates = tuple(
+        suggested = [
             item
             for item in plan.ability_ids
             if item in self.catalog.ids() and item not in self._used
-        )
-        if not candidates:
-            candidates = tuple(item for item in self.catalog.ids() if item not in self._used)
+        ]
+        rest = [
+            item
+            for item in self.catalog.ids()
+            if item not in self._used and item not in suggested
+        ]
+        candidates = suggested + rest
         if not candidates:
             self._used.clear()
-            candidates = self.catalog.ids()
-        # Applied last so it can never be bypassed by a fallback: an ability
-        # whose preconditions are unmet has no command to run.
+            candidates = list(self.catalog.ids())
+        # Applied last so it can never be bypassed: an ability whose
+        # preconditions are unmet has no command to run.
         return tuple(item for item in candidates if self._available(item))
 
     def next_ability(self, agent_id: str = "local") -> str | None:
@@ -282,7 +295,17 @@ class Coordinator:
             if result.status not in SUCCESS_STATUSES:
                 self._outcome = DEGRADED
             next_state = self.rl.state_from(frozenset(self._used), self._outcome)
-            self.rl.update(state, ability_id, breakdown.total, next_state)
+            self.rl.update(
+                state,
+                ability_id,
+                breakdown.total,
+                next_state,
+                tuple(
+                    item
+                    for item in self.catalog.ids()
+                    if item not in self._used and self._available(item)
+                ),
+            )
             remaining = self.limit - self._issued
             if remaining > 0:
                 plan = self.planner.plan(self._observations, remaining)

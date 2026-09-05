@@ -1791,3 +1791,78 @@ def test_one_agents_discovery_unlocks_work_for_another(catalog: AbilityCatalog) 
             assert assignment.bindings == {"host.process.pid": "42"}
             return
     raise AssertionError(f"the second agent was never offered the unlocked ability: {handed}")
+
+
+def test_the_plan_orders_the_choice_but_does_not_bound_it(catalog: AbilityCatalog) -> None:
+    """A plan is advice. Treating it as the only source made it a whitelist:
+    the rule planner proposes a fixed catalog prefix that shrinks as the budget
+    is spent, so work unlocked mid-run was never offered."""
+    coordinator = Coordinator(catalog, planner_mode="rules", max_steps=3)
+    coordinator.start()
+    planned = set(coordinator._plan.ability_ids)
+    offered = set(coordinator._candidates())
+    assert planned < offered
+    # Everything runnable is on the table, not just the three that were planned.
+    assert offered == {a.id for a in catalog.all() if not a.requires}
+    # The planner still has its say: its suggestions are ranked first, and
+    # equal values are broken by candidate order.
+    assert coordinator._candidates()[: len(planned)] == coordinator._plan.ability_ids
+
+
+def test_an_unlocked_ability_is_offered_even_though_no_plan_named_it(
+    catalog: AbilityCatalog,
+) -> None:
+    coordinator = Coordinator(catalog, planner_mode="rules", max_steps=4)
+    coordinator.start()
+    assert "inspect-process-status" not in coordinator._plan.ability_ids
+    coordinator.record_result(
+        ExecutionResult(
+            "collect-process-list", "succeeded", "UID PID\nnobody 5 0 x\n", "", 0, "dry-run", 0.1
+        )
+    )
+    assert "inspect-process-status" in coordinator._candidates()
+
+
+def test_the_future_term_only_counts_actions_that_are_reachable(
+    catalog: AbilityCatalog,
+) -> None:
+    """Unlocking changes which actions exist. A max over the whole catalog
+    values a state that opened three abilities exactly like one that opened
+    none, so the value function could not represent opening options."""
+    policy = QPolicy(catalog, optimism=0.0)
+    reachable, unreachable = catalog.ids()[0], catalog.ids()[1]
+    policy.q[("next", unreachable)] = 10.0
+    policy.q[("next", reachable)] = 1.0
+
+    policy.update("s", reachable, 0.0, "next", (reachable,))
+    narrow = policy.q[("s", reachable)]
+    policy.q.pop(("s", reachable))
+    policy.update("s", reachable, 0.0, "next", (reachable, unreachable))
+    assert policy.q[("s", reachable)] > narrow
+
+
+def test_an_untried_action_outranks_one_measured_to_be_worse(
+    catalog: AbilityCatalog,
+) -> None:
+    """Every reward here is positive, so a table starting at zero makes an
+    untried action look strictly worse than one already tried and the first
+    tie-break would be confirmed forever."""
+    tried, untried = catalog.ids()[0], catalog.ids()[1]
+    policy = QPolicy(catalog, epsilon=0.0, optimism=2.0)
+    policy.q[("s", tried)] = 1.0
+    assert policy.choose("s", (tried, untried)) == untried
+    # Once measured as better, it wins on its own merit rather than on novelty.
+    policy.q[("s", tried)] = 3.0
+    assert policy.choose("s", (tried, untried)) == tried
+
+
+def test_optimism_survives_a_round_trip(catalog: AbilityCatalog, tmp_path: Path) -> None:
+    # Saved tables hold measured pairs only, so an absent pair must still read
+    # back as unmeasured rather than as a measured zero.
+    path = tmp_path / "q.json"
+    policy = QPolicy(catalog, optimism=2.0)
+    policy.q[("s", catalog.ids()[0])] = 1.0
+    policy.save(path)
+    restored = QPolicy(catalog, optimism=2.0)
+    assert restored.load(path) is True
+    assert restored.value("s", catalog.ids()[1]) == 2.0
