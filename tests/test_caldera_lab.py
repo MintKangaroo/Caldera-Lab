@@ -2640,21 +2640,39 @@ def test_reaches_follows_the_dependency_chain(catalog: AbilityCatalog) -> None:
     assert not bench._reaches(catalog, root, root)
 
 
-def test_a_per_episode_latent_rate_is_not_recovered(catalog: AbilityCatalog) -> None:
-    """The negative result, pinned. When the risk is fixed a policy discounts
-    it fine, but when it is drawn fresh each episode the tabular policy sits at
-    the no-information line: it averages the two regimes into one Q value
-    rather than reading this run's rate off early failures, which the state
-    gives it no way to do. A small budget keeps the test quick; the sign of the
-    position, not its exact value, is the finding."""
+def test_a_per_episode_rate_is_not_recovered_when_observing_means_paying(
+    catalog: AbilityCatalog,
+) -> None:
+    """Drawn fresh each episode, the risk's only evidence is the risky ability's
+    own failure -- which is also the costly commitment. By the time it is seen
+    the decision is made and its dependents are gone, so the policy sits at the
+    no-information line. This is not a state-capacity limit; the next test shows
+    the same state reaching the oracle once the evidence comes cheaply."""
     outcomes = _distinct_outcomes(catalog)
     limits = bench.latent_risk_bounds(
         catalog, outcomes, "collect-process-list", (0.0, 0.9),
         episodes=1500, trials=80,
     )
-    # There is genuine value in knowing the rate: the two orders trade places
-    # between the safe and dangerous draws.
-    assert limits.headroom > 0
-    # The policy does not capture it -- it lands at or below committing to one
-    # fixed order, never near the oracle.
-    assert limits.position < 25.0
+    assert limits.headroom > 0  # knowing the rate is genuinely worth something
+    assert limits.position < 25.0  # the policy captures ~none of it
+
+
+def test_a_canary_shifts_both_reference_lines(catalog: AbilityCatalog) -> None:
+    """A canary -- a cheap ability failing at the same latent rate with nothing
+    depending on it -- separates observing the risk from paying for it. Whether
+    the policy then reaches the oracle is a convergence result that needs a full
+    training budget, so it lives in tests/probe_latent_canary.py rather than
+    here; this only checks the canary is wired through and changes the problem.
+    """
+    outcomes = _distinct_outcomes(catalog)
+    without = bench.latent_risk_bounds(
+        catalog, outcomes, "collect-process-list", (0.0, 0.9), episodes=1, trials=40,
+    )
+    withc = bench.latent_risk_bounds(
+        catalog, outcomes, "collect-process-list", (0.0, 0.9), episodes=1, trials=40,
+        canary="collect-host-identity",
+    )
+    # The canary also failing lowers what any order can score, so it is a
+    # different problem, not a relabelling.
+    assert withc.no_information < without.no_information
+    assert withc.headroom > 0

@@ -524,6 +524,7 @@ def latent_risk_bounds(
     trials: int = 400,
     gamma: float = GAMMA,
     state_mode: str | None = None,
+    canary: str | None = None,
 ) -> LatentRiskBounds:
     """Bound the per-episode latent-risk problem for one risky ability.
 
@@ -531,10 +532,26 @@ def latent_risk_bounds(
     no-information and oracle lines come from forcing the two orders that
     matter -- the chain first, or the risky ability's dependents deferred to
     the end -- at each rate. The policy is trained and measured on the same mix.
+
+    Without a canary the only evidence of the drawn rate is the risky ability's
+    own failure, which is also the costly commitment: by the time it is
+    observed the decision is made and its dependents are gone, so the
+    information arrives too late to act on. Pass `canary` -- a cheap ability
+    that fails at the same latent rate but has nothing depending on it -- and
+    the evidence is available before the commitment. The `degraded` bit already
+    in the state carries it; no larger state is needed, and enlarging it to
+    chase this instead slows convergence for nothing.
     """
-    if risky_ability not in catalog.ids():
-        raise ValueError(f"unknown ability: {risky_ability}")
+    for name in (risky_ability, canary):
+        if name is not None and name not in catalog.ids():
+            raise ValueError(f"unknown ability: {name}")
     scorer = _Scorer(catalog, outcomes)
+
+    def rates_for(rate: float) -> dict[str, float]:
+        drawn = {risky_ability: rate}
+        if canary is not None:
+            drawn[canary] = rate
+        return drawn
     best = bounds(catalog, outcomes, gamma=gamma).best_order
     dependents = [
         item
@@ -549,7 +566,7 @@ def latent_risk_bounds(
 
     def per_rate(order: tuple[str, ...], rate: float) -> float:
         return sum(
-            _forced_order(catalog, scorer, order, 20_000 + t, {risky_ability: rate}, gamma)
+            _forced_order(catalog, scorer, order, 20_000 + t, rates_for(rate), gamma)
             for t in range(trials)
         ) / trials
 
@@ -575,7 +592,7 @@ def latent_risk_bounds(
         if greedy:
             coordinator.rl.epsilon = 0.0
             _exploit_only(coordinator.rl)
-        executor = FaultInjector(_Replay(scorer), 0.0, seed=seed, rates={risky_ability: rate})
+        executor = FaultInjector(_Replay(scorer), 0.0, seed=seed, rates=rates_for(rate))
         coordinator.start()
         while (assignment := coordinator.next_assignment()) is not None:
             coordinator.record_result(
