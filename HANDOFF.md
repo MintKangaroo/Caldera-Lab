@@ -412,6 +412,18 @@ canary 파라미터는 결국 제거(위험 근원이 이미 카나리아라 불
 - 재현 `tests/probe_nonstationary.py <log>`. CI엔 구조적 테스트
   (`test_a_committed_order_is_stale_when_the_risk_mix_shifts`).
 
+#### 온라인 회복 곡선 후속 (2026-09-07)
+
+정적 stale/adapted를 동적으로 확인. `bench.recovery_curve`가 before mix로 수렴시킨 뒤 이동해
+계속 학습하며 after mix greedy return을 체크포인트별로 반환(offset -1 = 이동 순간의 수렴 before-
+정책). 실측: at-shift 6.927 → +0/+100/+300/+1000/+4000 = 6.93/6.93/6.87/6.72/6.93. **곡선 평평
+= 딥 없음** — 수렴한 적응 정책에겐 이동이 비-사건(회복할 것 없음). 딥은 before-정책 미수렴 시에만
+나오며 그건 이동 회복이 아니라 초기 학습. 작업 #2의 정적 발견을 동적으로 재확인.
+
+- `bench.recovery_curve(catalog, outcomes, risky, before_high, after_high, converge_episodes=,
+  checkpoints=, ...)` → `[(offset, greedy_return), ...]`. probe_nonstationary.py에 통합.
+- CI 테스트 `test_the_recovery_curve_starts_at_the_shift_and_walks_forward`(형태만).
+
 ### RL vs 규칙 planner 정량 비교 (2026-09-07)
 
 Claude planner는 이 계획을 거부하고 LLM planner는 ID만 재배열(로컬 재검증)하므로, 실제 대결은

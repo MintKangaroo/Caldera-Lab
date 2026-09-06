@@ -62,9 +62,22 @@ def main(log: Path) -> int:
           f"{shift.commit_relearning:>+13.4f}")
     print(f"{'RL':<8}{shift.rl_stale:>10.4f}{shift.rl_adapted:>10.4f}"
           f"{shift.rl_relearning:>+13.4f}")
+
+    # The same story online: converge on the before mix, then shift and keep
+    # learning, grading greedily on the after mix at each checkpoint.
+    curve = bench.recovery_curve(
+        catalog, outcomes, RISKY, before_high=BEFORE_HIGH, after_high=AFTER_HIGH,
+        converge_episodes=12000, checkpoints=(0, 100, 300, 1000, 4000), trials=200,
+    )
+    print("\nonline recovery curve (greedy return on the after mix)")
+    for offset, value in curve:
+        when = "at shift" if offset <= 0 else f"+{offset} episodes"
+        print(f"  {when:>14}  {value:.4f}")
     print(
-        "\nExpected: commit loses ~1 when stale and must re-choose; RL loses ~0,\n"
-        "and its stale return still clears the best committed order for the new mix."
+        "\nExpected: commit loses ~1 when stale and must re-choose; RL loses ~0.\n"
+        "The recovery curve is flat -- a converged adaptive policy has nothing to\n"
+        "recover, because it never committed to the mix. A dip appears only when\n"
+        "the before-policy was not yet converged, which is ordinary learning."
     )
     return 0
 

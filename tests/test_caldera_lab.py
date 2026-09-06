@@ -2799,6 +2799,26 @@ def test_a_committed_order_is_stale_when_the_risk_mix_shifts(catalog: AbilityCat
     assert shift.commit_relearning > 0
 
 
+def test_the_recovery_curve_starts_at_the_shift_and_walks_forward(
+    catalog: AbilityCatalog,
+) -> None:
+    """The online curve through a mix shift. Offset -1 is the converged
+    before-policy the moment the shift lands, then each checkpoint is that many
+    episodes of online learning later. That the curve stays near its start --
+    the shift being a non-event for a converged adaptive policy -- is a
+    convergence result and lives in tests/probe_nonstationary.py; this checks
+    the curve's shape: it opens at the shift value and advances in order."""
+    outcomes = _distinct_outcomes(catalog)
+    curve = bench.recovery_curve(
+        catalog, outcomes, "collect-process-list", before_high=0.2, after_high=0.8,
+        converge_episodes=300, checkpoints=(0, 150), trials=40,
+    )
+    offsets = [offset for offset, _ in curve]
+    assert offsets == [-1, 0, 150]
+    # Offsets -1 and 0 are the same table graded twice -- nothing ran between.
+    assert curve[0][1] == curve[1][1]
+
+
 def test_the_rules_order_is_not_the_worst_and_rl_beats_it(catalog: AbilityCatalog) -> None:
     """The contest the lab actually runs. The Claude planner refuses this task
     and the model-backed ones only reorder ids that are re-validated, so what RL

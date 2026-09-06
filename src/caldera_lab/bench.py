@@ -41,6 +41,7 @@ __all__ = [
     "multi_risk_bounds",
     "NonstationaryRisk",
     "nonstationary_risk",
+    "recovery_curve",
     "PlannerComparison",
     "planner_comparison",
     "ProbeValue",
@@ -1015,6 +1016,84 @@ def nonstationary_risk(
         commit_stale=commit_on(best_commit(before_high), after_high),
         commit_adapted=commit_on(best_commit(after_high), after_high),
     )
+
+
+def recovery_curve(
+    catalog: AbilityCatalog,
+    outcomes: dict[str, str],
+    risky_ability: str,
+    before_high: float,
+    after_high: float,
+    low_rate: float = 0.0,
+    high_rate: float = 0.9,
+    converge_episodes: int = 12000,
+    checkpoints: tuple[int, ...] = (0, 100, 300, 1000, 4000),
+    trials: int = 200,
+    gamma: float = GAMMA,
+    state_mode: str | None = None,
+) -> list[tuple[int, float]]:
+    """Track the greedy policy through a mix shift, learning online the whole way.
+
+    Trains `converge_episodes` on the `before_high` mix, then keeps learning on
+    the `after_high` mix, and returns the greedy return on the after mix at each
+    checkpoint (episodes past the shift). Checkpoint -1 is prepended: the
+    converged before-policy graded on the after mix, i.e. the value the moment
+    the shift lands. A flat curve means the shift was a non-event -- the policy
+    never committed to the mix, so there is nothing to recover. The dip only
+    appears if the before-policy was not yet converged, which is ordinary
+    learning, not shift-recovery.
+    """
+    if risky_ability not in catalog.ids():
+        raise ValueError(f"unknown ability: {risky_ability}")
+    scorer = _Scorer(catalog, outcomes)
+
+    def rates_for(rate: float) -> dict[str, float]:
+        return {risky_ability: rate}
+
+    def play(table: dict[tuple[str, str], float], seed: int, rate: float, greedy: bool) -> float:
+        coordinator = Coordinator(
+            catalog, planner_mode="rules", seed=seed, max_steps=len(catalog.ids()),
+            state_mode=state_mode,
+        )
+        coordinator.rl.q = table
+        if greedy:
+            coordinator.rl.epsilon = 0.0
+            _exploit_only(coordinator.rl)
+        executor = FaultInjector(_Replay(scorer), 0.0, seed=seed, rates=rates_for(rate))
+        coordinator.start()
+        while (assignment := coordinator.next_assignment()) is not None:
+            coordinator.record_result(
+                executor.execute(catalog.get(assignment.ability_id), LabPolicy())
+            )
+        rewards = [
+            float(event.details["total"])
+            for event in coordinator.events
+            if event.event == "reward.scored"
+        ]
+        return discounted(rewards, gamma)
+
+    def rate_of(high: float, picker: random.Random) -> float:
+        return high_rate if picker.random() < high else low_rate
+
+    def graded(table: dict[tuple[str, str], float]) -> float:
+        picker = random.Random(9)
+        return sum(
+            play(dict(table), 40_000 + trial, rate_of(after_high, picker), greedy=True)
+            for trial in range(trials)
+        ) / trials
+
+    table: dict[tuple[str, str], float] = {}
+    trainer = random.Random(1)
+    for index in range(converge_episodes):
+        play(table, index, rate_of(before_high, trainer), greedy=False)
+    curve = [(-1, graded(table))]
+    step = 0
+    for target in sorted(checkpoints):
+        while step < target:
+            play(table, converge_episodes + step, rate_of(after_high, trainer), greedy=False)
+            step += 1
+        curve.append((target, graded(table)))
+    return curve
 
 
 PROBE_ID = "observe-latent-canary"
