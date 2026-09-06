@@ -2610,3 +2610,51 @@ def test_run_cli_takes_an_attempt_budget(tmp_path: Path) -> None:
     ]
     # Always fails, so it is offered again until the budget is spent.
     assert attempts == [1, 2, 3]
+
+
+def test_a_fixed_hidden_rate_needs_no_place_in_the_state(catalog: AbilityCatalog) -> None:
+    """The rate an operator fixes is learned across episodes without ever
+    entering the state: the Q value of a risky chain is discounted by its own
+    failures. This is why the earlier --fault-ability result worked with the
+    rate nowhere in the state."""
+    policy = QPolicy(catalog)
+    assert "rate" not in policy.state_from(set(), "clean")
+    assert "fault" not in policy.state_from(set(), "degraded")
+
+
+def test_the_state_cannot_say_which_ability_failed(catalog: AbilityCatalog) -> None:
+    """degraded is one bit for the whole run. It flips on any failure and never
+    says which, so it cannot carry the one piece of evidence -- the risky root
+    having failed -- that says this episode drew the dangerous rate."""
+    policy = QPolicy(catalog)
+    root_failed = policy.state_from(set(), "degraded", traits=frozenset(), step=1)
+    leaf_failed = policy.state_from(set(), "degraded", traits=frozenset(), step=1)
+    assert root_failed == leaf_failed
+
+
+def test_reaches_follows_the_dependency_chain(catalog: AbilityCatalog) -> None:
+    root = "collect-process-list"
+    assert bench._reaches(catalog, "inspect-process-status", root)
+    assert bench._reaches(catalog, "resolve-process-group", root)  # two links deep
+    assert not bench._reaches(catalog, "collect-account-list", root)
+    assert not bench._reaches(catalog, root, root)
+
+
+def test_a_per_episode_latent_rate_is_not_recovered(catalog: AbilityCatalog) -> None:
+    """The negative result, pinned. When the risk is fixed a policy discounts
+    it fine, but when it is drawn fresh each episode the tabular policy sits at
+    the no-information line: it averages the two regimes into one Q value
+    rather than reading this run's rate off early failures, which the state
+    gives it no way to do. A small budget keeps the test quick; the sign of the
+    position, not its exact value, is the finding."""
+    outcomes = _distinct_outcomes(catalog)
+    limits = bench.latent_risk_bounds(
+        catalog, outcomes, "collect-process-list", (0.0, 0.9),
+        episodes=1500, trials=80,
+    )
+    # There is genuine value in knowing the rate: the two orders trade places
+    # between the safe and dangerous draws.
+    assert limits.headroom > 0
+    # The policy does not capture it -- it lands at or below committing to one
+    # fixed order, never near the oracle.
+    assert limits.position < 25.0

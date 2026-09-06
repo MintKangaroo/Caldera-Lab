@@ -33,6 +33,8 @@ __all__ = [
     "bounds",
     "discounted",
     "evaluate",
+    "LatentRiskBounds",
+    "latent_risk_bounds",
     "load_outcomes",
     "order_spread",
     "under_faults",
@@ -449,6 +451,174 @@ def render_concurrency(rows: list[Concurrency], trained: bool) -> str:
             line += f"  {row.transfer:>8.1f}%"
         lines.append(line)
     return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class LatentRiskBounds:
+    """Where a policy lands when the risk changes every episode and is hidden.
+
+    A rate the operator fixes is learned across episodes without ever entering
+    the state -- the Q value of a risky chain is discounted by its failures on
+    its own. A rate drawn fresh each episode is different: acting well needs
+    this run's rate, whose only evidence is failures seen so far, and the
+    state carries no per-ability failure history to hold that. These bounds say
+    how much that costs.
+    """
+
+    no_information: float
+    """Best single order, same every episode -- cannot use within-run evidence."""
+    oracle: float
+    """Best order per episode, told the rate -- the fully-informed ceiling."""
+    measured: float
+    """The trained tabular policy."""
+
+    @property
+    def headroom(self) -> float:
+        return self.oracle - self.no_information
+
+    @property
+    def position(self) -> float:
+        """Where the policy sits between no-information and oracle, as a percent.
+
+        Below zero means the policy does worse than committing to one order:
+        averaging the two regimes into one Q value costs more than it buys.
+        """
+        return (
+            100.0 * (self.measured - self.no_information) / self.headroom
+            if self.headroom
+            else 0.0
+        )
+
+
+def _forced_order(
+    catalog: AbilityCatalog,
+    scorer: _Scorer,
+    order: tuple[str, ...],
+    seed: int,
+    rates: dict[str, float],
+    gamma: float,
+) -> float:
+    rank = {ability_id: index for index, ability_id in enumerate(order)}
+    coordinator = Coordinator(catalog, planner_mode="rules", seed=seed, max_steps=len(order))
+    coordinator.rl.choose = lambda state, candidates: min(candidates, key=lambda c: rank[c])
+    executor = FaultInjector(_Replay(scorer), 0.0, seed=seed, rates=rates)
+    coordinator.start()
+    while (assignment := coordinator.next_assignment()) is not None:
+        coordinator.record_result(
+            executor.execute(catalog.get(assignment.ability_id), LabPolicy())
+        )
+    rewards = [
+        float(event.details["total"])
+        for event in coordinator.events
+        if event.event == "reward.scored"
+    ]
+    return discounted(rewards, gamma)
+
+
+def latent_risk_bounds(
+    catalog: AbilityCatalog,
+    outcomes: dict[str, str],
+    risky_ability: str,
+    rates: tuple[float, ...],
+    episodes: int = 12000,
+    trials: int = 400,
+    gamma: float = GAMMA,
+    state_mode: str | None = None,
+) -> LatentRiskBounds:
+    """Bound the per-episode latent-risk problem for one risky ability.
+
+    Each episode draws one of `rates` for `risky_ability`, uniformly. The
+    no-information and oracle lines come from forcing the two orders that
+    matter -- the chain first, or the risky ability's dependents deferred to
+    the end -- at each rate. The policy is trained and measured on the same mix.
+    """
+    if risky_ability not in catalog.ids():
+        raise ValueError(f"unknown ability: {risky_ability}")
+    scorer = _Scorer(catalog, outcomes)
+    best = bounds(catalog, outcomes, gamma=gamma).best_order
+    dependents = [
+        item
+        for item in catalog.ids()
+        if item == risky_ability
+        or _reaches(catalog, item, risky_ability)
+    ]
+    deferred = tuple(
+        [item for item in best if item not in dependents]
+        + [item for item in best if item in dependents]
+    )
+
+    def per_rate(order: tuple[str, ...], rate: float) -> float:
+        return sum(
+            _forced_order(catalog, scorer, order, 20_000 + t, {risky_ability: rate}, gamma)
+            for t in range(trials)
+        ) / trials
+
+    by_order = {
+        "chain_first": {rate: per_rate(best, rate) for rate in rates},
+        "deferred": {rate: per_rate(deferred, rate) for rate in rates},
+    }
+    no_information = max(
+        sum(values.values()) / len(rates) for values in by_order.values()
+    )
+    oracle = sum(
+        max(by_order[order][rate] for order in by_order) for rate in rates
+    ) / len(rates)
+
+    def play(
+        table: dict[tuple[str, str], float], seed: int, rate: float, greedy: bool
+    ) -> float:
+        coordinator = Coordinator(
+            catalog, planner_mode="rules", seed=seed, max_steps=len(catalog.ids()),
+            state_mode=state_mode,
+        )
+        coordinator.rl.q = table
+        if greedy:
+            coordinator.rl.epsilon = 0.0
+            _exploit_only(coordinator.rl)
+        executor = FaultInjector(_Replay(scorer), 0.0, seed=seed, rates={risky_ability: rate})
+        coordinator.start()
+        while (assignment := coordinator.next_assignment()) is not None:
+            coordinator.record_result(
+                executor.execute(catalog.get(assignment.ability_id), LabPolicy())
+            )
+        rewards = [
+            float(event.details["total"])
+            for event in coordinator.events
+            if event.event == "reward.scored"
+        ]
+        return discounted(rewards, gamma)
+
+    table: dict[tuple[str, str], float] = {}
+    picker = random.Random(1)
+    for index in range(episodes):
+        play(table, index, rates[picker.randrange(len(rates))], greedy=False)
+    picker = random.Random(2)
+    measured = sum(
+        play(dict(table), 30_000 + t, rates[picker.randrange(len(rates))], greedy=True)
+        for t in range(trials)
+    ) / trials
+    return LatentRiskBounds(no_information, oracle, measured)
+
+
+def _reaches(catalog: AbilityCatalog, item: str, source: str) -> bool:
+    """Whether `item` depends, directly or through the chain, on `source`."""
+    produced_by = {
+        producer.trait: ability.id
+        for ability in catalog.all()
+        for producer in ability.produces
+    }
+    seen: set[str] = set()
+    frontier = list(catalog.get(item).requires)
+    while frontier:
+        trait = frontier.pop()
+        producer = produced_by.get(trait)
+        if producer is None or producer in seen:
+            continue
+        if producer == source:
+            return True
+        seen.add(producer)
+        frontier.extend(catalog.get(producer).requires)
+    return False
 
 
 def render(bounds_: Bounds, measured: dict[int, tuple[float, tuple[str, ...]]]) -> str:
