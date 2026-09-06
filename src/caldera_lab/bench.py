@@ -41,6 +41,8 @@ __all__ = [
     "multi_risk_bounds",
     "NonstationaryRisk",
     "nonstationary_risk",
+    "PlannerComparison",
+    "planner_comparison",
     "ProbeValue",
     "probe_value",
     "load_outcomes",
@@ -345,6 +347,80 @@ def under_faults(
         )
         total += value
     return total / trials if trials else 0.0
+
+
+@dataclass(frozen=True)
+class PlannerComparison:
+    """What learning the order buys over the rules planner's fixed one.
+
+    The rules planner proposes the catalog order and the model-backed planners
+    only reorder ability ids that are re-validated locally -- and the Claude
+    planner refuses this task outright and falls back to rules. So the contest
+    is not LLM-vs-RL; it is the fixed catalog order against a policy that learns
+    the order. This holds both lines: `rules` is the catalog order, `rl` the
+    trained policy, both graded the same way and averaged over fault draws.
+    """
+
+    rules: float
+    """The catalog order the rules planner would run."""
+    rl: float
+    """The trained tabular policy."""
+    worst: float | None
+    """Worst feasible order -- only defined for a clean run (no faults)."""
+    best: float | None
+    """Best feasible order (the DP optimum) -- clean runs only."""
+
+    @property
+    def rl_gain(self) -> float:
+        """How much return the learned order adds over the catalog order."""
+        return self.rl - self.rules
+
+    @property
+    def rules_position(self) -> float:
+        """Where the catalog order sits in the clean feasible range, as a percent."""
+        if self.worst is None or self.best is None or self.best == self.worst:
+            return 0.0
+        return 100.0 * (self.rules - self.worst) / (self.best - self.worst)
+
+
+def planner_comparison(
+    catalog: AbilityCatalog,
+    outcomes: dict[str, str],
+    episodes: int = 12000,
+    trials: int = 400,
+    fault_rates: dict[str, float] | None = None,
+    max_attempts: int = 1,
+    gamma: float = GAMMA,
+    state_mode: str | None = None,
+) -> PlannerComparison:
+    """Compare the rules planner's catalog order against the learned policy.
+
+    Both are graded the same way -- averaged discounted return over `trials`
+    fault draws (a single draw when there are no faults). With `fault_rates` the
+    DP bounds no longer hold, so `worst`/`best` are reported only for a clean
+    run. The rules line is the fixed catalog order; the RL line is trained for
+    `episodes` under the same conditions and then graded greedily.
+    """
+    scorer = _Scorer(catalog, outcomes)
+    order = catalog.ids()
+    faults = fault_rates or {}
+    rules = sum(
+        _forced_order(catalog, scorer, order, 20_000 + t, faults, gamma)
+        for t in range(trials)
+    ) / trials
+    table: dict[tuple[str, str], float] = {}
+    evaluate(
+        catalog, outcomes, episodes=episodes, state_mode=state_mode, gamma=gamma,
+        fault_rates=faults, max_attempts=max_attempts, table=table,
+    )
+    rl = under_faults(
+        catalog, outcomes, table, trials=trials, state_mode=state_mode, gamma=gamma,
+        fault_rates=faults, max_attempts=max_attempts,
+    )
+    if fault_rates:
+        return PlannerComparison(rules, rl, None, None)
+    limits = bounds(catalog, outcomes, gamma=gamma)
+    return PlannerComparison(rules, rl, limits.worst, limits.best)
 
 
 @dataclass(frozen=True)

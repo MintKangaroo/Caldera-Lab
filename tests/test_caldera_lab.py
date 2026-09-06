@@ -2772,3 +2772,19 @@ def test_a_committed_order_is_stale_when_the_risk_mix_shifts(catalog: AbilityCat
     # The committed order for the before mix is the wrong one after the shift.
     assert shift.commit_stale < shift.commit_adapted
     assert shift.commit_relearning > 0
+
+
+def test_the_rules_order_is_not_the_worst_and_rl_beats_it(catalog: AbilityCatalog) -> None:
+    """The contest the lab actually runs. The Claude planner refuses this task
+    and the model-backed ones only reorder ids that are re-validated, so what RL
+    adds over a planner is the order. The rules planner's catalog order is a
+    middling one -- strictly between the worst and best feasible orders, not the
+    worst as an earlier catalog's docs said -- and the learned policy beats it.
+    The converged gap and the fault comparison need the full budget and live in
+    tests/probe_planner.py; this checks the ordering and direction."""
+    outcomes = _distinct_outcomes(catalog)
+    clean = bench.planner_comparison(catalog, outcomes, episodes=1500, trials=60)
+    # Catalog order is genuinely middling, and this holds before any convergence.
+    assert clean.worst < clean.rules < clean.best
+    assert 0.0 < clean.rules_position < 100.0
+    assert clean.rl_gain > 0  # learning the order beats running the catalog order

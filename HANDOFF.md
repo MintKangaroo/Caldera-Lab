@@ -396,3 +396,22 @@ canary 파라미터는 결국 제거(위험 근원이 이미 카나리아라 불
   (`.rl_stale/.rl_adapted/.commit_stale/.commit_adapted`, 파생 `.rl_relearning/.commit_relearning`).
 - 재현 `tests/probe_nonstationary.py <log>`. CI엔 구조적 테스트
   (`test_a_committed_order_is_stale_when_the_risk_mix_shifts`).
+
+### RL vs 규칙 planner 정량 비교 (2026-09-07)
+
+Claude planner는 이 계획을 거부하고 LLM planner는 ID만 재배열(로컬 재검증)하므로, 실제 대결은
+**규칙 planner의 고정 catalog 순서 vs 순서를 학습하는 RL**입니다(`bench.planner_comparison`
+→ `PlannerComparison`). 무결점(12000 ep): worst 6.6658, **rules(catalog 순서) 7.0517 = 여지의
+20%**, RL 8.5777 = best(100%), gain +1.53. 실패 하(위험 근원 fault; DP 경계 불성립, 정책만 비교):
+rate 0.3/0.5/0.7에서 RL이 rules를 +1.20/+1.12/+1.34 앞섬 — RL은 도달 불가 사슬을 미루고 규칙은
+고정 순서라 못 함. `evaluate(episodes=0)` = 무학습 = catalog 순서 = 20%임을 확인(최악 아님).
+
+**중요 정정:** 이전 문서의 "최악 순서 = catalog 순서"는 depth-2 사슬 추가 전 카탈로그 기준이라
+**현재는 거짓**입니다. catalog 순서는 중간(20%)입니다. README "발견의 깊이" 블록의 stale 수치
+(best 8.7451/worst 7.6658/headroom 1.0792, 옛 학습 곡선)도 현재값(8.5777/6.6658/1.9119, 곡선
+0→20.2% 2500→81.4% 6000·12000→100%)으로 갱신했습니다.
+
+- `bench.planner_comparison(catalog, outcomes, episodes=, trials=, fault_rates=, max_attempts=, ...)`
+  → `PlannerComparison` (`.rules/.rl/.worst/.best`, 파생 `.rl_gain/.rules_position`).
+- 재현 `tests/probe_planner.py <log>`. CI엔 구조적 테스트
+  (`test_the_rules_order_is_not_the_worst_and_rl_beats_it`).
