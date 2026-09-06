@@ -15,18 +15,19 @@ independent risks on two chains, each with a canary.
 The finding, in the numbers it prints:
 
   correlated  the two risks share one draw, so there are still two worlds and
-              the bit names them exactly -- it reaches the oracle.
-  independent the risks are drawn apart, so there are four worlds. The bit
+              one bit names them exactly -- it reaches the oracle.
+  independent the risks are drawn apart, so there are four worlds. One bit
               still flips on any failure, separating all-safe from
-              something-failed, but it cannot say which risk fired, and the
-              right order differs by which one did. It captures most of the
-              ceiling -- the safe/unsafe split is the biggest lever -- but
-              leaves the part that needs naming the culprit.
+              something-failed, but it cannot say which risk fired. It captures
+              most of the ceiling -- the safe/unsafe split is the biggest lever.
 
-So one bit is enough exactly while the risks move together. Telling independent
-risks apart is what the single bit cannot do; carrying which one fired would
-need a bit per risk, which is the opposite of the single-risk lesson (there a
-second bit only slowed convergence).
+`per_risk` adds a failure bit per risk (watching each canary), so the state can
+name which one fired. It can, and it eventually helps -- but the four-times
+larger state converges so slowly that at a practical budget one bit wins
+outright, and even at a large budget `per_risk` has not reached the oracle
+(the canary's own misses cap it). Naming the culprit is representable and real,
+but it does not pay: the same lesson as the single risk, where a second bit
+only slowed convergence.
 """
 
 from __future__ import annotations
@@ -53,19 +54,34 @@ def main(log: Path) -> int:
         raise SystemExit(f"log is missing output for: {', '.join(missing)}")
 
     print(f"risks = {RISKS}, canaries = {CANARIES}, per-risk rate in {RATES}\n")
-    print(f"{'':<12}{'worlds':>7}{'no-info':>10}{'oracle':>10}{'one-bit':>10}{'of headroom':>14}")
+    header = f"{'':<14}{'worlds':>7}{'no-info':>9}{'oracle':>9}{'one-bit':>16}{'per-risk':>16}"
+    print(header)
     for label, correlated in (("correlated", True), ("independent", False)):
         limits = bench.multi_risk_bounds(
             catalog, outcomes, RISKS, canaries=CANARIES, correlated=correlated,
             episodes=12000, trials=400,
         )
         print(
-            f"{label:<12}{limits.worlds:>7}{limits.no_information:>10.4f}"
-            f"{limits.oracle:>10.4f}{limits.one_bit:>10.4f}{limits.position:>13.0f}%"
+            f"{label:<14}{limits.worlds:>7}{limits.no_information:>9.4f}{limits.oracle:>9.4f}"
+            f"{limits.one_bit:>10.4f} {limits.position:>4.0f}%"
+            f"{limits.per_risk:>10.4f} {limits.per_risk_position:>4.0f}%"
         )
+    # The per-risk bits keep converging past a normal budget; show that they
+    # eventually overtake one bit on the independent mix even though they start
+    # far behind (the four-times larger state learns slowly).
+    late = bench.multi_risk_bounds(
+        catalog, outcomes, RISKS, canaries=CANARIES, correlated=False,
+        episodes=25000, trials=400,
+    )
     print(
-        "\nExpected: correlated near 100% (one bit names the world), independent\n"
-        "short of it (one bit cannot say which of the two risks fired)."
+        f"\nindependent at 25000 episodes: one-bit {late.position:.0f}%, "
+        f"per-risk {late.per_risk_position:.0f}%"
+    )
+    print(
+        "\nExpected: correlated near 100% (one bit names the world). Independent:\n"
+        "one bit captures most of the ceiling; per-risk starts far behind and only\n"
+        "overtakes it with a much larger budget, still short of the oracle -- naming\n"
+        "the culprit is representable but does not pay at a practical budget."
     )
     return 0
 

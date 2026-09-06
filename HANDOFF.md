@@ -375,6 +375,21 @@ account-list depth-1)에 위험+카나리아를 두고 위험별 독립 draw로 
 - 재현 `tests/probe_multi_risk.py <log>`. CI엔 구조적 테스트
   (`test_independent_risks_leave_more_for_one_bit_to_miss`).
 
+#### 위험당 비트 후속 (2026-09-07): 표현 가능하나 값 못 함
+
+작업 #1의 열린 실("독립 위험 구분엔 위험당 비트 필요") 마무리. `QPolicy(watch=(...))`로 감시 대상
+능력의 실패 비트를 state에 append(coordinator가 `_failed` 추적, fingerprint에 watch 포함, 기존
+facts/issued 키 불변). `MultiRiskBounds.per_risk`가 카나리아를 watch한 정책을 측정.
+결과(독립): one_bit 71%(12000) vs per_risk 15%(12000) → 25000에서 per_risk 55%가 one_bit
+47%(노이즈)를 겨우 추월, 그래도 오라클 미달(카나리아 오탐이 상한). **결론: 위험당 비트는 표현
+가능하고 결국 정보를 나르지만 값을 못 함 — state 4배로 수렴 느려 실용 예산에선 한 비트가 압도.
+단일 위험 교훈("더 많은 state=해")과 동일.** 측정 노이즈: 단일 학습 시드라 one_bit이 71↔47
+흔들림; 정성적 결론만 견고, 정밀 crossover는 불확실(시드 평균 필요, 미수행).
+
+- production 변경: `rl.QPolicy(watch=)`, `state_from(faults=)`, `coordinator._failed` +
+  `Coordinator(watch=)`. Q_TABLE_VERSION 불변(새 축은 fingerprint로만 분리).
+- CI 테스트 `test_watching_a_risk_lets_the_state_name_which_one_failed`.
+
 ### 비정상(non-stationary) 위험 (2026-09-07)
 
 위험 분포가 시간에 따라 이동하면? 매 실행 안전/위험을 뽑되 위험 확률이 중간에 이동(0.2→0.8),

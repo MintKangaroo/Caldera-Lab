@@ -719,6 +719,8 @@ class MultiRiskBounds:
     """Best order per world, told which risks fired -- the informed ceiling."""
     one_bit: float
     """The trained policy, whose only failure evidence is one shared bit."""
+    per_risk: float
+    """A policy with a failure bit per watched risk, so it can tell them apart."""
     worlds: int
     """How many distinct risk worlds the mix draws from."""
 
@@ -726,13 +728,18 @@ class MultiRiskBounds:
     def headroom(self) -> float:
         return self.oracle - self.no_information
 
+    def _position(self, value: float) -> float:
+        return 100.0 * (value - self.no_information) / self.headroom if self.headroom else 0.0
+
     @property
     def position(self) -> float:
-        return (
-            100.0 * (self.one_bit - self.no_information) / self.headroom
-            if self.headroom
-            else 0.0
-        )
+        """Where the one-bit policy sits between no-information and oracle."""
+        return self._position(self.one_bit)
+
+    @property
+    def per_risk_position(self) -> float:
+        """Where the per-risk-bit policy sits -- how much naming the culprit recovers."""
+        return self._position(self.per_risk)
 
 
 def multi_risk_bounds(
@@ -825,11 +832,12 @@ def multi_risk_bounds(
         return tuple(rng.choice(rates) for _ in risks)
 
     def play(
-        table: dict[tuple[str, str], float], seed: int, world: tuple[float, ...], greedy: bool
+        table: dict[tuple[str, str], float], seed: int, world: tuple[float, ...],
+        greedy: bool, watch: tuple[str, ...] = (),
     ) -> float:
         coordinator = Coordinator(
             catalog, planner_mode="rules", seed=seed, max_steps=len(catalog.ids()),
-            state_mode=state_mode,
+            state_mode=state_mode, watch=watch,
         )
         coordinator.rl.q = table
         if greedy:
@@ -848,16 +856,26 @@ def multi_risk_bounds(
         ]
         return discounted(rewards, gamma)
 
-    table: dict[tuple[str, str], float] = {}
-    trainer = random.Random(1)
-    for index in range(episodes):
-        play(table, index, draw_world(trainer), greedy=False)
-    grader = random.Random(2)
-    one_bit = sum(
-        play(dict(table), 30_000 + t, draw_world(grader), greedy=True)
-        for t in range(trials)
-    ) / trials
-    return MultiRiskBounds(no_information, oracle, one_bit, len(worlds))
+    def trained_return(watch: tuple[str, ...]) -> float:
+        table: dict[tuple[str, str], float] = {}
+        trainer = random.Random(1)
+        for index in range(episodes):
+            play(table, index, draw_world(trainer), greedy=False, watch=watch)
+        grader = random.Random(2)
+        return sum(
+            play(dict(table), 30_000 + t, draw_world(grader), greedy=True, watch=watch)
+            for t in range(trials)
+        ) / trials
+
+    # Watch the earliest observable signal of each risk: its canary if it has
+    # one (run before the risky chain is committed), else the risky ability.
+    watched = tuple(
+        canaries[index] if canaries[index] is not None else risk
+        for index, risk in enumerate(risks)
+    )
+    one_bit = trained_return(())
+    per_risk = trained_return(watched)
+    return MultiRiskBounds(no_information, oracle, one_bit, per_risk, len(worlds))
 
 
 @dataclass(frozen=True)

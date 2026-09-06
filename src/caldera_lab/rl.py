@@ -32,12 +32,23 @@ class QPolicy:
         gamma: float = 0.85,
         optimism: float = 2.0,
         state_mode: str = FACTS,
+        watch: tuple[str, ...] = (),
     ) -> None:
         self.catalog = catalog
         self.random = random.Random(seed)
         self.epsilon = epsilon
         self.alpha = alpha
         self.gamma = gamma
+        # One `outcome` bit says whether anything has failed, not what. When
+        # several risks fail independently that is not enough to say which fired,
+        # and the right response differs by which one did. `watch` adds a failure
+        # bit for each named ability, so the state can tell them apart. It is
+        # empty by default: the extra bits only pay off when there is more than
+        # one risk to distinguish, and otherwise just enlarge the table.
+        unknown = [item for item in watch if item not in catalog.ids()]
+        if unknown:
+            raise ValueError(f"watch names abilities not in the catalog: {unknown}")
+        self.watch = tuple(watch)
         # Every reward here is positive, so a table initialised at zero makes an
         # untried action look strictly worse than one already tried: whatever
         # the first tie-break picked would be confirmed forever and a better
@@ -61,6 +72,7 @@ class QPolicy:
         *,
         traits: frozenset[str] | set[str] = frozenset(),
         step: int = 0,
+        faults: frozenset[str] | set[str] = frozenset(),
     ) -> str:
         """Build a state from the abilities already committed and how the run is going.
 
@@ -86,9 +98,16 @@ class QPolicy:
             known = "".join(
                 "1" if trait in traits else "0" for trait in sorted(self.catalog.traits())
             )
-            return f"{known}|{step}|{outcome}"
-        mask = "".join("1" if item in committed else "0" for item in self.catalog.ids())
-        return f"{mask}|{outcome}"
+            base = f"{known}|{step}|{outcome}"
+        else:
+            mask = "".join("1" if item in committed else "0" for item in self.catalog.ids())
+            base = f"{mask}|{outcome}"
+        if not self.watch:
+            return base
+        # A bit per watched ability: which of the named risks has failed so far,
+        # not merely that something has.
+        watched = "".join("1" if item in faults else "0" for item in self.watch)
+        return f"{base}|{watched}"
 
     def state(self, observations: tuple[str, ...]) -> str:
         """Abstract observations into a state the table can actually revisit.
@@ -165,9 +184,11 @@ class QPolicy:
         """Ties a saved table to the catalog and the state layout it used.
 
         A table learned under one state layout means something else under
-        another, so the mode is part of what a table is compatible with.
+        another, so the mode -- and any watched abilities that add bits to the
+        state -- are part of what a table is compatible with.
         """
-        return f"{self.state_mode}::" + "|".join(self.catalog.ids())
+        watched = ("+" + ",".join(self.watch)) if self.watch else ""
+        return f"{self.state_mode}{watched}::" + "|".join(self.catalog.ids())
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

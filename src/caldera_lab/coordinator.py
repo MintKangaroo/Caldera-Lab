@@ -72,6 +72,7 @@ class Coordinator:
         max_steps: int | None = None,
         agent_policies: dict[str, LabPolicy] | None = None,
         state_mode: str | None = None,
+        watch: tuple[str, ...] = (),
     ) -> None:
         self.catalog = catalog
         self.policy = policy or LabPolicy()
@@ -79,11 +80,10 @@ class Coordinator:
         # less trusted agent cannot be handed everything the catalog allows.
         self.agent_policies: dict[str, LabPolicy] = dict(agent_policies or {})
         self.planner = _make_planner(catalog, planner_mode)
-        self.rl = (
-            QPolicy(catalog, seed=seed)
-            if state_mode is None
-            else QPolicy(catalog, seed=seed, state_mode=state_mode)
-        )
+        kwargs = {"seed": seed, "watch": watch}
+        if state_mode is not None:
+            kwargs["state_mode"] = state_mode
+        self.rl = QPolicy(catalog, **kwargs)
         self.reward_model = reward_model or RewardModel()
         self.run_id = uuid.uuid4().hex[:12]
         self.q_table_path = q_table_path
@@ -95,6 +95,7 @@ class Coordinator:
         self._observations: tuple[str, ...] = ()
         self._used: set[str] = set()
         self._outcome = CLEAN
+        self._failed: set[str] = set()
         self._issued = 0
         self._pending: dict[str, tuple[str, str]] = {}
         self._attempts: dict[str, int] = {}
@@ -165,6 +166,7 @@ class Coordinator:
             self._outcome,
             traits=self.facts.traits(),
             step=self._issued,
+            faults=frozenset(self._failed),
         )
 
     def _available(self, ability_id: str) -> bool:
@@ -320,6 +322,7 @@ class Coordinator:
             )
             if result.status not in SUCCESS_STATUSES:
                 self._outcome = DEGRADED
+                self._failed.add(ability_id)
                 # A failure produced nothing, so the ability is not spent. Put
                 # it back within its attempt budget and let the policy decide
                 # whether trying again is worth a step.

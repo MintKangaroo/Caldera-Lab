@@ -2627,9 +2627,34 @@ def test_the_state_cannot_say_which_ability_failed(catalog: AbilityCatalog) -> N
     says which, so it cannot carry the one piece of evidence -- the risky root
     having failed -- that says this episode drew the dangerous rate."""
     policy = QPolicy(catalog)
-    root_failed = policy.state_from(set(), "degraded", traits=frozenset(), step=1)
-    leaf_failed = policy.state_from(set(), "degraded", traits=frozenset(), step=1)
+    root_failed = policy.state_from(
+        set(), "degraded", traits=frozenset(), step=1, faults={"collect-process-list"}
+    )
+    leaf_failed = policy.state_from(
+        set(), "degraded", traits=frozenset(), step=1, faults={"collect-account-list"}
+    )
     assert root_failed == leaf_failed
+
+
+def test_watching_a_risk_lets_the_state_name_which_one_failed(catalog: AbilityCatalog) -> None:
+    """`watch` adds a failure bit per named ability, so the state can tell which
+    of several risks fired -- the evidence one shared bit cannot carry. It only
+    changes the state for watched abilities, and a table learned with it is not
+    compatible with one learned without."""
+    watched = ("collect-process-list", "collect-account-list")
+    policy = QPolicy(catalog, watch=watched)
+    none = policy.state_from(set(), "degraded", traits=frozenset(), step=1)
+    first = policy.state_from(set(), "degraded", step=1, faults={watched[0]})
+    second = policy.state_from(set(), "degraded", step=1, faults={watched[1]})
+    both = policy.state_from(set(), "degraded", step=1, faults=set(watched))
+    # Which risk failed is now distinguishable, where one bit conflated them.
+    assert len({none, first, second, both}) == 4
+    assert none.endswith("|00") and first.endswith("|10")
+    assert second.endswith("|01") and both.endswith("|11")
+    # A failure outside the watched set does not touch the extra bits.
+    assert policy.state_from(set(), "degraded", step=1, faults={"collect-system-info"}) == none
+    # The watched set is part of what a saved table applies to.
+    assert QPolicy(catalog, watch=watched).fingerprint() != QPolicy(catalog).fingerprint()
 
 
 def test_reaches_follows_the_dependency_chain(catalog: AbilityCatalog) -> None:
