@@ -369,6 +369,52 @@ headroom              1.0792
 
 탐험률을 두 배로 올린 상수 버전(75.4%)보다 기본 탐험률의 적응형이 낫습니다.
 
+### 실패 아래에서의 학습
+
+이 랩의 샌드박스는 결정론적입니다. 같은 컨테이너에서 같은 고정된 읽기를 하니 매번 성공합니다.
+그 결과 state의 `degraded` 절반, 보상의 실패 분기(−1.0), timeout 경로가 **테스트에서만 실행되고
+실제 운영에서는 한 번도 실행되지 않았습니다.**
+
+그래서 실패는 관찰되는 것이 아니라 **주입해야** 하고, 감사 로그가 그 사실을 말해야 합니다.
+
+```bash
+caldera-lab run --fault-ability collect-process-list=0.6
+```
+
+```text
+ability.completed  status=failed  injected=True
+                   stderr='fault injected by the lab; the container did not report this'
+```
+
+능력은 그대로 실행되고 판정만 바뀝니다. 격리 경계와 소요 시간은 실제 실행의 것 그대로입니다.
+
+**첫 시도는 실패했습니다.** 모든 능력에 균일한 확률로 실패를 넣었더니, 실패를 겪고 학습한
+정책이 오히려 조금 나빴습니다.
+
+```text
+평가 fault 0.3에서   무결점 학습 4.0090   결함 학습 3.7187   (-0.29)
+```
+
+당연한 결과입니다. **실패가 선택과 무관하면 선택으로 피할 수 없으므로 배울 것이 없고**, Q
+추정에 잡음만 더합니다. 위험이 학습 가능하려면 실패가 행동에 따라 달라져야 합니다.
+
+`--fault-ability`로 능력별 실패율을 주면 달라집니다. 3단 사슬의 뿌리만 60% 실패하게 하면:
+
+```text
+무결점 학습 -> 6.1529
+위험 학습   -> 7.1330   (+0.98)
+
+무결점 학습 순서: collect-process-list -> inspect-process-status -> ...  (위험한 뿌리부터)
+위험 학습 순서  : collect-installed-packages -> inspect-package-contents -> ...
+```
+
+정책이 **불안정한 뿌리를 가진 사슬을 뒤로 미루는 것**을 학습했습니다. 생산자가 실패하면 그
+뒤의 사슬 전체가 실행되지 못하므로, 그 사슬의 기대값이 낮아지기 때문입니다.
+
+여기에는 대가가 있습니다. **실패를 넣으면 DP 최적 기준선이 성립하지 않습니다** — 최적 순서가
+더는 catalog만의 성질이 아니라 분포가 됩니다. `bench`의 정확한 탐색은 무결점 경우를 재고,
+실패 아래의 정책은 여러 시행의 평균으로 비교합니다.
+
 ### 상태 표현
 
 여기서 정체의 원인이 드러납니다. state가 **어떤 능력을 배정했는지**를 담고 있었습니다. 그런데
@@ -490,7 +536,7 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 178 passed
+pytest             -> 186 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
@@ -507,6 +553,7 @@ RL credit          -> 4 에이전트 동시 실행 시 고유 state 2 -> 8 (순�
 RL 행동 공간       -> 잠금 해제된 작업이 후보에서 누락되던 문제 수정 (2/6 -> 6/6)
 RL 순서 학습       -> depth 2 사슬 추가로 학습 여지 0.6034 -> 1.0792
                       미측정 값을 측정된 최대값으로 바꾼 뒤 12000에서 DP 최적 100%
+실패 아래 학습     -> 균일 실패는 학습 불가(-0.29), 능력별 실패는 학습 가능(+0.98)
 bench              -> caldera-lab bench로 위 수치 전부 재현 가능
 최적 순서          -> 2^11 부분집합 DP로 정확히 계산, 최악 순서 = catalog 순서
 Q table 전이       -> 순차 학습 table을 동시 실행이 사실상 전부 읽음 (두 표현 모두)

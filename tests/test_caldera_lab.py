@@ -25,6 +25,7 @@ from caldera_lab.executor import (
     DockerLabExecutor,
     DryRunExecutor,
     ExecutionResult,
+    FaultInjector,
     LocalLabExecutor,
 )
 from caldera_lab.facts import FactRejected, extract, resolve
@@ -2433,3 +2434,96 @@ def test_concurrency_without_training_reports_no_transfer(
     assert measured.hits == 0
     assert measured.transfer == 0.0
     assert measured.lookups > 0
+
+
+class _CountingExecutor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute(self, ability: Ability, policy: LabPolicy) -> ExecutionResult:
+        self.calls += 1
+        return ExecutionResult(ability.id, "succeeded", "output\n", "", 0, "docker", 0.4)
+
+
+def test_an_injected_failure_says_so(catalog: AbilityCatalog) -> None:
+    """A fixed read of a fixed container does not fail on its own. Recording a
+    caused failure as though the container reported it would make the audit log
+    lie about what happened."""
+    inner = _CountingExecutor()
+    injector = FaultInjector(inner, rate=1.0)
+    result = injector.execute(catalog.get("collect-host-identity"), LabPolicy())
+    assert result.status == "failed"
+    assert result.injected is True
+    assert "injected" in result.stderr
+    # The ability still ran: only the verdict was replaced, so isolation and
+    # timing are those of a real execution.
+    assert inner.calls == 1
+    assert result.isolation == "docker"
+
+
+def test_a_result_that_was_not_spoiled_is_untouched(catalog: AbilityCatalog) -> None:
+    injector = FaultInjector(_CountingExecutor(), rate=0.0)
+    result = injector.execute(catalog.get("collect-host-identity"), LabPolicy())
+    assert result.status == "succeeded"
+    assert result.injected is False
+
+
+def test_a_rate_can_belong_to_one_ability(catalog: AbilityCatalog) -> None:
+    """Only a rate that differs between abilities gives a policy something to
+    act on: one that is the same everywhere cannot be avoided by choosing
+    differently, so it is noise in the estimates rather than a lesson."""
+    injector = FaultInjector(
+        _CountingExecutor(), rate=0.0, rates={"collect-process-list": 1.0}
+    )
+    assert injector.rate_for("collect-process-list") == 1.0
+    assert injector.rate_for("collect-host-identity") == 0.0
+    spoiled = injector.execute(catalog.get("collect-process-list"), LabPolicy())
+    intact = injector.execute(catalog.get("collect-host-identity"), LabPolicy())
+    assert spoiled.injected and spoiled.status == "failed"
+    assert not intact.injected and intact.status == "succeeded"
+
+
+@pytest.mark.parametrize("rate", [-0.1, 1.5])
+def test_a_fault_rate_outside_zero_to_one_is_refused(rate: float) -> None:
+    with pytest.raises(ValueError):
+        FaultInjector(_CountingExecutor(), rate=rate)
+    with pytest.raises(ValueError):
+        FaultInjector(_CountingExecutor(), rates={"collect-host-identity": rate})
+
+
+def test_a_failed_producer_takes_its_chain_with_it(catalog: AbilityCatalog) -> None:
+    coordinator = Coordinator(catalog, planner_mode="rules", max_steps=len(catalog.ids()))
+    coordinator.start()
+    coordinator.record_result(
+        ExecutionResult(
+            "collect-process-list", "failed", "", "injected", 1, "docker", 0.1, injected=True
+        )
+    )
+    assert not coordinator._available("inspect-process-status")
+    assert not coordinator._available("resolve-process-group")
+    # And the run is now degraded, which is the half of the state space that
+    # never occurred while nothing could fail.
+    assert coordinator._state().endswith("|degraded")
+
+
+def test_run_cli_refuses_a_malformed_fault_spec() -> None:
+    for spec in ["missing-equals", "collect-host-identity=nope", "nope=0.5",
+                 "collect-host-identity=2"]:
+        with pytest.raises(SystemExit):
+            cli.main(["run", "--executor", "dry-run", "--fault-ability", spec])
+
+
+def test_run_cli_injects_a_declared_fault(tmp_path: Path) -> None:
+    log = tmp_path / "run.jsonl"
+    cli.main([
+        "run", "--executor", "dry-run", "--steps", "12", "--no-q-table",
+        "--log", str(log), "--fault-ability", "collect-process-list=1.0",
+    ])
+    completed = [
+        json.loads(line)["details"]
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if '"ability.completed"' in line
+    ]
+    spoiled = [row for row in completed if row["status"] == "failed"]
+    assert [row["ability_id"] for row in spoiled] == ["collect-process-list"]
+    assert spoiled[0]["injected"] is True

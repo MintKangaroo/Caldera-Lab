@@ -21,7 +21,14 @@ from .bench import (
 from .bench import render as render_bench
 from .catalog import AbilityCatalog
 from .coordinator import Coordinator
-from .executor import DockerLabExecutor, DryRunExecutor, ExecutionResult, LocalLabExecutor
+from .executor import (
+    DockerLabExecutor,
+    DryRunExecutor,
+    ExecutionResult,
+    Executor,
+    FaultInjector,
+    LocalLabExecutor,
+)
 from .orchestrator import Event, Orchestrator, now, write_events
 from .policy import LabPolicy
 from .report import coverage, load_events, render, status_document, summarize, write_status
@@ -158,7 +165,45 @@ class _EventSink:
                 handle.write(json.dumps(asdict(event), ensure_ascii=False) + "\n")
 
 
+def _fault_rates(
+    parser: argparse.ArgumentParser, catalog: AbilityCatalog, specs: list[str]
+) -> dict[str, float]:
+    rates: dict[str, float] = {}
+    for spec in specs:
+        ability_id, _, raw = spec.partition("=")
+        if not ability_id or not raw:
+            parser.error(f"--fault-ability expects ID=RATE, got: {spec}")
+        try:
+            catalog.get(ability_id)
+        except KeyError:
+            parser.error(f"--fault-ability names an ability outside the catalog: {ability_id}")
+        try:
+            rate = float(raw)
+        except ValueError:
+            parser.error(f"--fault-ability rate must be a number: {spec}")
+        if not 0.0 <= rate <= 1.0:
+            parser.error(f"--fault-ability rate must be between 0 and 1: {spec}")
+        rates[ability_id] = rate
+    return rates
+
+
 def _build_executor(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    catalog: AbilityCatalog | None = None,
+) -> Executor:
+    executor = _isolated_executor(parser, args)
+    rate = getattr(args, "fault_rate", 0.0)
+    specs = getattr(args, "fault_ability", [])
+    rates = _fault_rates(parser, catalog, specs) if specs and catalog else {}
+    if rate or rates:
+        # Wraps rather than replaces: the ability still runs in the same
+        # sandbox, only the verdict is spoiled, and every spoiled result says so.
+        return FaultInjector(executor, rate, rates=rates)
+    return executor
+
+
+def _isolated_executor(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> DockerLabExecutor | DryRunExecutor | LocalLabExecutor:
     if args.executor == "docker":
@@ -193,7 +238,7 @@ def _agent_policies(
 def _serve(
     parser: argparse.ArgumentParser, catalog: AbilityCatalog, args: argparse.Namespace
 ) -> None:
-    executor = _build_executor(parser, args)
+    executor = _build_executor(parser, args, catalog)
     policy = LabPolicy()
     agent_policies = _agent_policies(parser, catalog, args.agent_policy)
     coordinator = Coordinator(
@@ -293,6 +338,28 @@ def main(argv: list[str] | None = None) -> None:
     )
     run.add_argument("--no-status", action="store_true")
     run.add_argument(
+        "--fault-ability",
+        action="append",
+        default=[],
+        metavar="ID=RATE",
+        help=(
+            "fail one ability at its own rate. A rate that is the same "
+            "everywhere cannot be avoided by choosing differently, so only "
+            "per-ability rates give a policy anything to learn. Repeatable."
+        ),
+    )
+    run.add_argument(
+        "--fault-rate",
+        type=float,
+        default=0.0,
+        metavar="P",
+        help=(
+            "deliberately fail this share of executions so the policy meets "
+            "failure; every spoiled result is marked injected in the audit log"
+        ),
+    )
+
+    run.add_argument(
         "--q-table",
         type=Path,
         default=Path(".runtime/q_table.json"),
@@ -327,6 +394,28 @@ def main(argv: list[str] | None = None) -> None:
         "--status", type=Path, default=None, help="status file (default: next to --log)"
     )
     serve.add_argument("--no-status", action="store_true")
+    serve.add_argument(
+        "--fault-ability",
+        action="append",
+        default=[],
+        metavar="ID=RATE",
+        help=(
+            "fail one ability at its own rate. A rate that is the same "
+            "everywhere cannot be avoided by choosing differently, so only "
+            "per-ability rates give a policy anything to learn. Repeatable."
+        ),
+    )
+    serve.add_argument(
+        "--fault-rate",
+        type=float,
+        default=0.0,
+        metavar="P",
+        help=(
+            "deliberately fail this share of executions so the policy meets "
+            "failure; every spoiled result is marked injected in the audit log"
+        ),
+    )
+
     serve.add_argument("--q-table", type=Path, default=Path(".runtime/q_table.json"))
     serve.add_argument("--no-q-table", action="store_true")
     serve.add_argument(
@@ -390,7 +479,7 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command != "run":
         return
-    executor = _build_executor(parser, args)
+    executor = _build_executor(parser, args, catalog)
     orchestrator = Orchestrator(
         catalog,
         executor,

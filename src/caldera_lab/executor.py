@@ -3,11 +3,12 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import random
 import subprocess
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -30,10 +31,70 @@ class ExecutionResult:
     return_code: int
     isolation: str
     duration_seconds: float = 0.0
+    injected: bool = False
+    """Whether this failure was injected rather than observed.
+
+    A fixed read of a fixed container does not fail on its own, so studying how
+    a policy behaves under failure means causing failures. Saying so in the
+    audit log is the difference between a fault injection experiment and a
+    misleading record.
+    """
 
 
 class Executor(Protocol):
     def execute(self, ability: Ability, policy: LabPolicy) -> ExecutionResult: ...
+
+
+class FaultInjector:
+    """Wraps an executor and fails a declared share of executions on purpose.
+
+    This lab's sandbox is deterministic: the same fixed reads of the same
+    throwaway container succeed every time. Half the policy's state space
+    ("degraded") and the whole failure branch of the reward were therefore
+    dead in every real run. This makes them live, and every result it spoils
+    is marked `injected` so no reader mistakes it for something the container
+    actually did.
+
+    The ability still runs. Only the verdict is replaced, so the isolation
+    boundary and the timing are exactly those of a real execution.
+    """
+
+    def __init__(
+        self,
+        executor: Executor,
+        rate: float = 0.0,
+        seed: int = 7,
+        rates: dict[str, float] | None = None,
+    ) -> None:
+        for value in (rate, *(rates or {}).values()):
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"fault rate must be between 0 and 1: {value}")
+        self.executor = executor
+        self.rate = rate
+        # Per-ability rates are what make failure something a policy can act
+        # on. A rate that is the same everywhere cannot be avoided by choosing
+        # differently, so it is noise in the estimates and nothing to learn.
+        self.rates = dict(rates or {})
+        self.random = random.Random(seed)
+        self.injected = 0
+
+    def rate_for(self, ability_id: str) -> float:
+        return self.rates.get(ability_id, self.rate)
+
+    def execute(self, ability: Ability, policy: LabPolicy) -> ExecutionResult:
+        result = self.executor.execute(ability, policy)
+        rate = self.rate_for(ability.id)
+        if rate <= 0.0 or self.random.random() >= rate:
+            return result
+        self.injected += 1
+        return replace(
+            result,
+            status="failed",
+            stdout="",
+            stderr="fault injected by the lab; the container did not report this",
+            return_code=1,
+            injected=True,
+        )
 
 
 class DryRunExecutor:

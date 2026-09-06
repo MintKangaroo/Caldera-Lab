@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .catalog import AbilityCatalog
 from .coordinator import Coordinator
-from .executor import ExecutionResult
+from .executor import ExecutionResult, FaultInjector
 from .facts import extract
 from .policy import LabPolicy
 from .reward import RewardModel
@@ -35,6 +35,7 @@ __all__ = [
     "evaluate",
     "load_outcomes",
     "order_spread",
+    "under_faults",
 ]
 
 GAMMA = 0.85
@@ -137,6 +138,16 @@ class _Scorer:
     def rollout(self, order: tuple[str, ...]) -> list[float]:
         model = RewardModel()
         return [self.score(model, ability_id) for ability_id in order]
+
+
+class _Replay:
+    """Hands back what the recorded run produced, so faults are the only variable."""
+
+    def __init__(self, scorer: _Scorer) -> None:
+        self.scorer = scorer
+
+    def execute(self, ability: object, policy: LabPolicy) -> ExecutionResult:
+        return self.scorer.result(ability.id)
 
 
 def feasible_order(catalog: AbilityCatalog, rng: random.Random) -> tuple[str, ...]:
@@ -250,11 +261,21 @@ def evaluate(
     state_mode: str | None = None,
     gamma: float = GAMMA,
     seed: int = 0,
+    fault_rate: float = 0.0,
+    fault_rates: dict[str, float] | None = None,
+    table: dict[tuple[str, str], float] | None = None,
 ) -> tuple[float, tuple[str, ...]]:
-    """Train for `episodes`, then measure one greedy run over recorded output."""
+    """Train for `episodes`, then measure one greedy run over recorded output.
+
+    With a fault rate the lab spoils that share of executions, which is the
+    only way this sandbox meets failure: the same fixed reads of the same
+    throwaway container otherwise succeed every time. Pass `table` to measure a
+    policy that was trained somewhere else.
+    """
     scorer = _Scorer(catalog, outcomes)
     limit = len(catalog.ids())
-    table: dict[tuple[str, str], float] = {}
+    if table is None:
+        table = {}
 
     def episode(greedy: bool, policy_seed: int) -> tuple[float, tuple[str, ...]]:
         coordinator = Coordinator(
@@ -265,10 +286,15 @@ def evaluate(
         if greedy:
             coordinator.rl.epsilon = 0.0
             _exploit_only(coordinator.rl)
+        executor = FaultInjector(
+            _Replay(scorer), fault_rate, seed=policy_seed, rates=fault_rates
+        )
         coordinator.start()
         ran: list[str] = []
         while (assignment := coordinator.next_assignment()) is not None:
-            coordinator.record_result(scorer.result(assignment.ability_id))
+            coordinator.record_result(
+                executor.execute(catalog.get(assignment.ability_id), LabPolicy())
+            )
             ran.append(assignment.ability_id)
         rewards = [
             float(event.details["total"])
@@ -280,6 +306,33 @@ def evaluate(
     for index in range(episodes):
         episode(False, seed + index)
     return episode(True, seed)
+
+
+def under_faults(
+    catalog: AbilityCatalog,
+    outcomes: dict[str, str],
+    table: dict[tuple[str, str], float],
+    fault_rate: float = 0.0,
+    trials: int = 200,
+    state_mode: str | None = None,
+    gamma: float = GAMMA,
+    fault_rates: dict[str, float] | None = None,
+) -> float:
+    """Mean discounted return of an already-trained policy across fault draws.
+
+    Faults make the outcome of a run a distribution, so a single number needs
+    an average -- and the exact search stops being the right reference, because
+    the best order is no longer a property of the catalog alone.
+    """
+    total = 0.0
+    for trial in range(trials):
+        value, _ = evaluate(
+            catalog, outcomes, episodes=0, state_mode=state_mode, gamma=gamma,
+            seed=10_000 + trial, fault_rate=fault_rate, fault_rates=fault_rates,
+            table=dict(table),
+        )
+        total += value
+    return total / trials if trials else 0.0
 
 
 @dataclass(frozen=True)
