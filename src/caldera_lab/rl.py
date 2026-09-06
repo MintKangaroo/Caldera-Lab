@@ -41,13 +41,18 @@ class QPolicy:
         # Every reward here is positive, so a table initialised at zero makes an
         # untried action look strictly worse than one already tried: whatever
         # the first tie-break picked would be confirmed forever and a better
-        # order could never be found. An unseen pair is therefore worth more
-        # than a measured one until it has been measured.
+        # order could never be found. An unmeasured pair is therefore worth the
+        # best value measured anywhere so far, and `optimism` is only the floor
+        # that applies before anything has been measured. A constant here has to
+        # guess the reward scale, and guessing low reintroduces the same
+        # problem in miniature: once any action is measured above the constant,
+        # every untried one looks worse again.
         self.optimism = optimism
+        self._max_value = 0.0
         if state_mode not in STATE_MODES:
             raise ValueError(f"Unknown state mode: {state_mode!r}")
         self.state_mode = state_mode
-        self.q: dict[tuple[str, str], float] = {}
+        self._q: dict[tuple[str, str], float] = {}
 
     def state_from(
         self,
@@ -116,8 +121,22 @@ class QPolicy:
         # Ties are broken by candidate order so a run is reproducible for a given seed.
         return next(item for item in candidates if self.value(state, item) == best)
 
+    @property
+    def q(self) -> dict[tuple[str, str], float]:
+        return self._q
+
+    @q.setter
+    def q(self, table: dict[tuple[str, str], float]) -> None:
+        self._q = table
+        self._max_value = max(table.values(), default=0.0)
+
+    def unmeasured_value(self) -> float:
+        """What an action nobody has tried in this state is assumed to be worth."""
+        return max(self.optimism, self._max_value)
+
     def value(self, state: str, action: str) -> float:
-        return self.q.get((state, action), self.optimism)
+        entry = self._q.get((state, action))
+        return self.unmeasured_value() if entry is None else entry
 
     def update(
         self,
@@ -138,7 +157,9 @@ class QPolicy:
         reachable = self.catalog.ids() if next_actions is None else next_actions
         future = max((self.value(next_state, item) for item in reachable), default=0.0)
         old = self.value(state, action)
-        self.q[(state, action)] = old + self.alpha * (reward + self.gamma * future - old)
+        updated = old + self.alpha * (reward + self.gamma * future - old)
+        self._q[(state, action)] = updated
+        self._max_value = max(self._max_value, updated)
 
     def fingerprint(self) -> str:
         """Ties a saved table to the catalog and the state layout it used.

@@ -264,6 +264,7 @@ def evaluate(
         coordinator.rl.q = table
         if greedy:
             coordinator.rl.epsilon = 0.0
+            _exploit_only(coordinator.rl)
         coordinator.start()
         ran: list[str] = []
         while (assignment := coordinator.next_assignment()) is not None:
@@ -296,6 +297,22 @@ class Concurrency:
         return 100.0 * self.hits / self.lookups if self.lookups else 0.0
 
 
+def _exploit_only(policy: object) -> None:
+    """Make a greedy run exploit what was learned instead of exploring.
+
+    An unmeasured pair is deliberately attractive during learning, so a run
+    that just sets epsilon to zero still walks into actions nobody has tried.
+    Measuring a learned policy means asking what it does among the actions it
+    actually has values for.
+    """
+    table = policy.q
+
+    def measured_only(state: str, action: str) -> float:
+        return table.get((state, action), float("-inf"))
+
+    policy.value = measured_only
+
+
 def _dispatch(
     catalog: AbilityCatalog,
     scorer: _Scorer,
@@ -319,6 +336,7 @@ def _dispatch(
         coordinator.rl.q = table
     if greedy:
         coordinator.rl.epsilon = 0.0
+        _exploit_only(coordinator.rl)
     seen: list[str] = []
     original = coordinator.rl.choose
 

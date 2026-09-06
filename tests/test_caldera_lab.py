@@ -1878,31 +1878,36 @@ def test_the_future_term_only_counts_actions_that_are_reachable(
     assert policy.q[("s", reachable)] > narrow
 
 
-def test_an_untried_action_outranks_one_measured_to_be_worse(
+def test_an_untried_action_is_worth_the_best_thing_measured_so_far(
     catalog: AbilityCatalog,
 ) -> None:
-    """Every reward here is positive, so a table starting at zero makes an
-    untried action look strictly worse than one already tried and the first
-    tie-break would be confirmed forever."""
+    """A constant floor has to guess the reward scale, and guessing low brings
+    back the zero-initialisation problem in miniature: once any action is
+    measured above the constant, every untried one looks worse again."""
     tried, untried = catalog.ids()[0], catalog.ids()[1]
     policy = QPolicy(catalog, epsilon=0.0, optimism=2.0)
-    policy.q[("s", tried)] = 1.0
+    assert policy.unmeasured_value() == 2.0
+
+    # The scale comes from anywhere in the table, not from this state.
+    policy.q = {("elsewhere", tried): 9.0, ("s", tried): 4.0}
+    assert policy.unmeasured_value() == 9.0
     assert policy.choose("s", (tried, untried)) == untried
-    # Once measured as better, it wins on its own merit rather than on novelty.
-    policy.q[("s", tried)] = 3.0
+
+    # Equal to the best measured anywhere, it ties, and candidate order decides.
+    policy.q = {("s", tried): 9.0}
     assert policy.choose("s", (tried, untried)) == tried
 
 
 def test_optimism_survives_a_round_trip(catalog: AbilityCatalog, tmp_path: Path) -> None:
     # Saved tables hold measured pairs only, so an absent pair must still read
-    # back as unmeasured rather than as a measured zero.
+    # back as unmeasured -- and against the restored scale, not a fresh one.
     path = tmp_path / "q.json"
     policy = QPolicy(catalog, optimism=2.0)
-    policy.q[("s", catalog.ids()[0])] = 1.0
+    policy.q = {("s", catalog.ids()[0]): 9.0}
     policy.save(path)
     restored = QPolicy(catalog, optimism=2.0)
     assert restored.load(path) is True
-    assert restored.value("s", catalog.ids()[1]) == 2.0
+    assert restored.value("s", catalog.ids()[1]) == 9.0
 
 
 def test_depth_is_the_shallowest_chain_that_reaches_an_ability(
@@ -2395,27 +2400,30 @@ def test_a_burst_does_not_collapse_onto_one_state(catalog: AbilityCatalog) -> No
         assert measured.distinct_states >= len(catalog.ids()) - 2
 
 
-def test_the_fact_state_tells_a_burst_apart_from_a_sequential_run(
+def test_sequential_training_answers_a_concurrent_burst(
     catalog: AbilityCatalog,
 ) -> None:
-    """Mid-burst nothing has reported, so no trait is known yet. That is a
-    different situation from the same step of a sequential run, where a
-    producer may already have landed, and the state says so."""
+    """Training is sequential, dispatch may be concurrent, and one table has to
+    serve both. It did not always: the outcome component used to be the
+    previous step's status, which mid-burst does not exist, so a burst asked
+    for keys sequential training never wrote."""
     outcomes = _distinct_outcomes(catalog)
-    lightly_trained = bench.concurrency(catalog, outcomes, 4, episodes=5)
-    assert lightly_trained.transfer < 100.0
-    # The states are reachable sequentially, just off the greedy path, so
-    # exploration finds them and the two modes end up sharing a table.
-    well_trained = bench.concurrency(catalog, outcomes, 4, episodes=500)
-    assert well_trained.transfer > lightly_trained.transfer
+    for mode in ("facts", "issued"):
+        measured = bench.concurrency(catalog, outcomes, 4, episodes=200, state_mode=mode)
+        assert measured.transfer >= 90.0, mode
 
 
-def test_the_ability_mask_cannot_tell_them_apart(catalog: AbilityCatalog) -> None:
-    """Which is why the previous representation transferred trivially: the set
-    of issued abilities is the same whoever received them."""
-    outcomes = _distinct_outcomes(catalog)
-    measured = bench.concurrency(catalog, outcomes, 4, episodes=5, state_mode="issued")
-    assert measured.transfer == 100.0
+def test_measuring_a_learned_policy_means_exploiting_not_exploring(
+    catalog: AbilityCatalog,
+) -> None:
+    """An unmeasured pair is deliberately attractive while learning, so setting
+    epsilon to zero is not enough to measure what was learned."""
+    policy = QPolicy(catalog, epsilon=0.0)
+    tried, untried = catalog.ids()[0], catalog.ids()[1]
+    policy.q = {("elsewhere", tried): 9.0, ("s", tried): 4.0}
+    assert policy.choose("s", (tried, untried)) == untried
+    bench._exploit_only(policy)
+    assert policy.choose("s", (tried, untried)) == tried
 
 
 def test_concurrency_without_training_reports_no_transfer(
