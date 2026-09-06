@@ -183,9 +183,18 @@ allowlist가 거부한 ID 목록도 함께 보여줍니다.
 
 ```text
 collect-process-list       -> host.process.pid    -> inspect-process-status
-collect-installed-packages -> host.package.name   -> inspect-package-contents
-collect-account-list       -> host.account.name   -> inspect-account-identity
+                                                        |
+                                              host.process.gid
+                                                        v
+                                                 resolve-process-group
+collect-installed-packages -> host.package.name  -> inspect-package-contents
+collect-account-list       -> host.account.name  -> inspect-account-identity
 ```
+
+사슬 하나는 두 단계 깊습니다. `ps -ef`가 pid를 주고, `/proc/<pid>/status`가 그 프로세스의
+gid를 주고, 그제서야 `getent group <gid>`를 실행할 수 있습니다. 이 사슬을 고른 이유는 발견되는
+값이 전부 숫자이고 `/etc/group`을 읽을 뿐이라 **읽을 수 있는 파일이 하나도 늘지 않기**
+때문입니다.
 
 억지 의존이 아니라 실제 의존입니다. `cat /proc/<pid>/status`는 pid를 모르면 실행할 수
 없습니다. 선행 조건이 안 채워진 능력은 애초에 배정되지 않습니다.
@@ -300,8 +309,8 @@ state의 의미가 바뀌었으므로 `Q_TABLE_VERSION`을 2로 올렸습니다.
 이 절의 수치는 저장소 안의 도구가 만듭니다. 감사 로그를 넣으면 그대로 재현됩니다.
 
 ```bash
-caldera-lab run --executor docker --planner rules --steps 11 --log run.jsonl
-caldera-lab bench --log run.jsonl --episodes 0 200 800 2500 6000 12000
+caldera-lab run --executor docker --planner rules --steps 12 --log run.jsonl
+caldera-lab bench --log run.jsonl --episodes 0 2500 12000 25000
 ```
 
 `bench`는 능력별 보상이 순서와 무관하다는 전제 위에서 2^11개 부분집합에 대한 DP로 **정확한
@@ -315,9 +324,9 @@ caldera-lab bench --log run.jsonl --episodes 0 200 800 2500 6000 12000
 보고하게 됩니다.**
 
 ```text
-best feasible order   7.8927
-worst feasible order  7.2893   = catalog 순서 (학습 전 정책이 실행하는 순서)
-headroom              0.6034
+best feasible order   8.7451
+worst feasible order  7.6658   = catalog 순서 (학습 전 정책이 실행하는 순서)
+headroom              1.0792
 ```
 
 최적 정책은 해석 가능합니다: **생산자를 실행하고 그 후속을 곧바로 수확**하는 것을 세 번
@@ -326,13 +335,16 @@ headroom              0.6034
 
 ```text
  episodes    return   of headroom
-        0    7.2893          0.0%
-      200    7.4855         32.5%
-      800    7.6040         52.1%
-     2500    7.8134         86.9%
-     6000    7.8134         86.9%
-    12000    7.8927        100.0%
+        0    7.6658          0.0%
+     2500    8.3019         58.9%
+    12000    8.4380         71.5%
+    25000    8.5906         85.7%
 ```
+
+depth 2 사슬을 넣기 전에는 학습 여지가 0.6034였고 12000 에피소드에서 100%에 닿았습니다.
+사슬 하나가 늘자 여지가 1.0792로 거의 두 배가 되고, 25000에서도 85.7%로 아직 오르는 중입니다.
+최적 순서도 달라져서 **3단 사슬을 맨 앞에 연속으로 배치**합니다 — 가장 깊은 발견이 할인
+때문에 가장 이르게 놓일수록 값지기 때문입니다.
 
 ### 상태 표현
 
@@ -455,7 +467,7 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 170 passed
+pytest             -> 172 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
@@ -464,14 +476,13 @@ Docker smoke       -> 8 executions, 0 failures, loopback 외 인터페이스 없
 Beacon             -> 127.0.0.1 전용 바인드, 4/4 실행 (컨테이너는 --network none 유지)
 Multi-agent        -> 3 에이전트 동시 실행, 중복 배정 0건
 Coordinator        -> beacon 실행에서 plan/RL/reward 이벤트 생성, Q table 학습 확인
-ATT&CK coverage    -> 8 techniques / 11 abilities (T1057·T1087.001·T1518은 후속 능력과 공유)
-Preconditions      -> docker 11/11 성공, gated 능력 3개 모두 부모 이후에만 실행
+ATT&CK coverage    -> 9 techniques / 12 abilities (T1057·T1087.001·T1518은 후속 능력과 공유)
+Preconditions      -> docker 12/12 성공, gated 능력 4개 모두 부모 이후에만 실행 (최대 깊이 2)
 Fact 추출          -> pid 1개, package 20개, account 17개 (실제 컨테이너 출력 기준)
 Timeout            -> timed-out 상태, 컨테이너 누수 0건 (수정 전: 컨테이너 계속 실행)
 RL credit          -> 4 에이전트 동시 실행 시 고유 state 2 -> 8 (순차와 동일)
 RL 행동 공간       -> 잠금 해제된 작업이 후보에서 누락되던 문제 수정 (2/6 -> 6/6)
-RL 순서 학습       -> 상태를 fact 기반으로 바꾼 뒤 12000 에피소드에서 DP 최적 100% 도달
-                      (배정 마스크 기반은 같은 지점에서 52.1%)
+RL 순서 학습       -> depth 2 사슬 추가로 학습 여지 0.6034 -> 1.0792, 25000에서 85.7%
 bench              -> caldera-lab bench로 위 수치 전부 재현 가능
 최적 순서          -> 2^11 부분집합 DP로 정확히 계산, 최악 순서 = catalog 순서
 Q table 전이       -> 순차 학습 table의 동시 실행 적중률 38% -> 75%

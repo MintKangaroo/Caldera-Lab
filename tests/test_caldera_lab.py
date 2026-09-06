@@ -64,6 +64,7 @@ def test_catalog_is_allowlisted(catalog: AbilityCatalog) -> None:
         "inspect-process-status",
         "inspect-package-contents",
         "inspect-account-identity",
+        "resolve-process-group",
     )
     with pytest.raises(KeyError):
         catalog.get("arbitrary-shell-command")
@@ -278,10 +279,10 @@ def test_the_default_state_records_what_is_known_not_what_was_run(
     assert policy.state_mode == FACTS
     one = policy.state(("collect-host-identity:succeeded:0",))
     other = policy.state(("collect-system-info:succeeded:0",))
-    assert one == other == "000|1|clean"
+    assert one == other == "0000|1|clean"
     # A discovery is not interchangeable: it changes what can be run next.
     assert policy.state(("collect-process-list:succeeded:0",)) != one
-    assert policy.state(()) == "000|0|clean"
+    assert policy.state(()) == "0000|0|clean"
     # Budget spent is part of the state, because the horizon changes the choice.
     assert policy.state(
         ("collect-host-identity:succeeded:0", "collect-system-info:succeeded:0")
@@ -671,7 +672,8 @@ def test_report_maps_executions_onto_attack_techniques(
 ) -> None:
     rows = coverage(catalog, summarize(load_events(_run_log(catalog, tmp_path))))
     assert {row["technique"] for row in rows} == {
-        "T1033", "T1082", "T1057", "T1083", "T1087.001", "T1613", "T1016", "T1518"
+        "T1033", "T1082", "T1057", "T1083", "T1087.001",
+        "T1613", "T1016", "T1518", "T1069.001",
     }
     executed = [row for row in rows if row["successes"]]
     assert len(executed) == 4
@@ -1446,7 +1448,7 @@ def test_sequential_state_sequence_is_unchanged(catalog: AbilityCatalog) -> None
     orchestrator = Orchestrator(catalog, DryRunExecutor(), planner_mode="rules")
     orchestrator.run(4)
     states = sorted(key[0] for key in orchestrator.rl.q)
-    assert states[0] == "000|0|clean"
+    assert states[0] == "0000|0|clean"
     assert all(state.endswith("|clean") for state in states)
     assert len(set(states)) == 4
 
@@ -1906,8 +1908,14 @@ def test_optimism_survives_a_round_trip(catalog: AbilityCatalog, tmp_path: Path)
 def test_depth_is_the_shallowest_chain_that_reaches_an_ability(
     catalog: AbilityCatalog,
 ) -> None:
+    depths = {ability.id: catalog.depth(ability.id) for ability in catalog.all()}
+    assert depths["collect-process-list"] == 0
+    assert depths["inspect-process-status"] == 1
+    # ps -ef gives the pid, /proc/<pid>/status gives the gid, and only then
+    # can the group be resolved.
+    assert depths["resolve-process-group"] == 2
     for ability in catalog.all():
-        assert catalog.depth(ability.id) == (1 if ability.requires else 0)
+        assert (depths[ability.id] > 0) is bool(ability.requires)
 
 
 def test_depth_counts_a_longer_chain(tmp_path: Path) -> None:
@@ -2190,6 +2198,7 @@ FACT_LINES = {
     "collect-process-list": "nobody 1 0 x\n",
     "collect-installed-packages": "busybox\n",
     "collect-account-list": "root:x:0:0\n",
+    "inspect-process-status": "Gid:\t65534\t65534\n",
     "lister": "7\n",
     "probe": "value\n",
 }
@@ -2360,6 +2369,15 @@ def test_the_search_refuses_output_that_never_produced_a_declared_trait(
         "collect-process-list": ["host.process.pid"]
     }
     with pytest.raises(bench.DependencyNotObserved, match="host.process.pid"):
+        bench.bounds(catalog, outcomes)
+
+    # The same holds one link further along the chain.
+    outcomes = _distinct_outcomes(catalog)
+    outcomes["inspect-process-status"] = "no gid here\n"
+    assert bench.unproduced_traits(catalog, outcomes) == {
+        "inspect-process-status": ["host.process.gid"]
+    }
+    with pytest.raises(bench.DependencyNotObserved, match="host.process.gid"):
         bench.bounds(catalog, outcomes)
 
 

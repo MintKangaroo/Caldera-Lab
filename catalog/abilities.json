@@ -2,7 +2,8 @@
   "traits": {
     "host.process.pid": "^[0-9]{1,7}$",
     "host.package.name": "^[a-z0-9][a-z0-9._+-]{0,63}$",
-    "host.account.name": "^[a-z_][a-z0-9_-]{0,31}$"
+    "host.account.name": "^[a-z_][a-z0-9_-]{0,31}$",
+    "host.process.gid": "^[0-9]{1,7}$"
   },
   "abilities": [
     {
@@ -149,6 +150,12 @@
       "volatile_patterns": [
         "\\b\\d+ kB\\b",
         "(?<=ctxt_switches:)\\s+\\d+"
+      ],
+      "produces": [
+        {
+          "trait": "host.process.gid",
+          "pattern": "(?m)^Gid:\\s+(\\d{1,7})"
+        }
       ]
     },
     {
@@ -181,6 +188,22 @@
       "risk": "low",
       "requires": [
         "host.account.name"
+      ]
+    },
+    {
+      "id": "resolve-process-group",
+      "name": "Resolve the group of a discovered process",
+      "tactic": "discovery",
+      "technique": "T1069.001",
+      "command": [
+        "getent",
+        "group",
+        "{host.process.gid}"
+      ],
+      "description": "Resolve the group a discovered process runs as. Two discoveries deep: the pid comes from the process listing and the gid from that process's status.",
+      "risk": "low",
+      "requires": [
+        "host.process.gid"
       ]
     }
   ]

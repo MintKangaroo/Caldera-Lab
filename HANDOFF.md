@@ -257,11 +257,22 @@ PYTHONPATH=src pytest -q
 README의 RL 수치는 전부 `caldera-lab bench`가 만듭니다.
 
 ```bash
-caldera-lab run --executor docker --planner rules --steps 11 --log run.jsonl
-caldera-lab bench --log run.jsonl --episodes 0 200 2500 12000
+caldera-lab run --executor docker --planner rules --steps 12 --log run.jsonl
+caldera-lab bench --log run.jsonl --episodes 0 2500 12000 25000
 caldera-lab bench --log run.jsonl --state-mode issued --episodes 2500
 ```
 
 DP는 두 가지 전제를 가정하지 않고 검사합니다: 능력별 보상이 순서와 무관한지, 그리고 기록된
 출력이 선언된 trait을 실제로 만들어내는지. 둘 중 하나라도 어긋나면 DP가 도달 불가능하거나
 틀린 순서를 최적이라고 보고하므로 거부합니다. DP 자체는 완전탐색과 대조하는 테스트가 있습니다.
+
+### 알아둘 것: 깊은 발견이 얕은 발견을 되풀이하면 측정이 깨집니다
+
+depth 2 사슬의 첫 후보는 `getent passwd <uid>`였습니다. 실제로 동작했지만, 그 출력
+`nobody:x:65534:...`이 `/etc/passwd`의 한 줄이라 `collect-account-list` 출력과 크기가 다른
+중첩을 만듭니다. `bench`가 총 보상 편차 0.941을 잡아내고 거부했습니다.
+
+정보 이득이 정규화되어 있어 출력이 **완전히 같으면** 문제가 없습니다(총합이 옮겨다닐 뿐).
+크기가 다른 중첩이 문제입니다. 그래서 `getent group <gid>`로 바꿨습니다 — `/etc/group`은
+catalog의 어떤 능력도 읽지 않습니다. 능력을 추가할 때 같은 함정을 밟을 수 있으니, CI의
+docker-smoke가 실제 출력으로 `bench`를 돌려 검사합니다.

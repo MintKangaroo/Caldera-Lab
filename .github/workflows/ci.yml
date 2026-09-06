@@ -44,11 +44,16 @@ jobs:
           mkdir -p smoke-workspace
           echo "ci-sample" > smoke-workspace/sample.txt
           python -m caldera_lab run \
-            --executor docker --planner rules --steps 11 \
+            --executor docker --planner rules --steps 12 \
             --workspace "$PWD/smoke-workspace" \
             --no-q-table --log smoke.jsonl
       - name: Assert every ability succeeded in the container
         run: python .github/scripts/check_smoke.py smoke.jsonl
+      # Runs against real container output, so it fails if a catalog change
+      # makes a reward depend on run order, or if a declared trait never
+      # actually appears in what an ability prints.
+      - name: Assert the measurement assumptions still hold
+        run: python -m caldera_lab bench --log smoke.jsonl
       - name: Assert the workspace stayed read-only
         run: |
           if docker run --rm --pull never --network none --read-only \

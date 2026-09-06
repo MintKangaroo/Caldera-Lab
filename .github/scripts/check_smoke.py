@@ -18,6 +18,7 @@ EXPECTED = {
     "inspect-process-status",
     "inspect-package-contents",
     "inspect-account-identity",
+    "resolve-process-group",
 }
 
 # Each gated ability and the ability whose output unlocks it.
@@ -25,6 +26,8 @@ DEPENDENCIES = {
     "inspect-process-status": "collect-process-list",
     "inspect-package-contents": "collect-installed-packages",
     "inspect-account-identity": "collect-account-list",
+    # Two discoveries deep: the pid, then that process's gid.
+    "resolve-process-group": "inspect-process-status",
 }
 
 
