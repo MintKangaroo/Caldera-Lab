@@ -12,6 +12,7 @@ not of invented output.
 from __future__ import annotations
 
 import functools
+import itertools
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,8 @@ __all__ = [
     "evaluate",
     "LatentRiskBounds",
     "latent_risk_bounds",
+    "MultiRiskBounds",
+    "multi_risk_bounds",
     "ProbeValue",
     "probe_value",
     "load_outcomes",
@@ -618,6 +621,165 @@ def latent_risk_bounds(
         for t in range(trials)
     ) / trials
     return LatentRiskBounds(no_information, oracle, measured)
+
+
+@dataclass(frozen=True)
+class MultiRiskBounds:
+    """What one degraded bit can do when several latent risks fire independently.
+
+    One risk needed one bit: the bit was 0 in the safe world and 1 in the bad
+    one, so it named the world exactly. With several independent risks the bit
+    still flips on any failure, so it separates "all safe" from "something
+    failed" but cannot say *which* risk fired -- and the right order differs by
+    which one did. These bounds say how much of the informed ceiling a single
+    bit can still reach.
+    """
+
+    no_information: float
+    """Best single order, same every episode."""
+    oracle: float
+    """Best order per world, told which risks fired -- the informed ceiling."""
+    one_bit: float
+    """The trained policy, whose only failure evidence is one shared bit."""
+    worlds: int
+    """How many distinct risk worlds the mix draws from."""
+
+    @property
+    def headroom(self) -> float:
+        return self.oracle - self.no_information
+
+    @property
+    def position(self) -> float:
+        return (
+            100.0 * (self.one_bit - self.no_information) / self.headroom
+            if self.headroom
+            else 0.0
+        )
+
+
+def multi_risk_bounds(
+    catalog: AbilityCatalog,
+    outcomes: dict[str, str],
+    risks: tuple[str, ...],
+    rates: tuple[float, ...] = (0.0, 0.9),
+    canaries: tuple[str | None, ...] | None = None,
+    correlated: bool = False,
+    episodes: int = 12000,
+    trials: int = 400,
+    gamma: float = GAMMA,
+    state_mode: str | None = None,
+) -> MultiRiskBounds:
+    """Bound the per-episode problem when several risks are drawn each episode.
+
+    Each risk in `risks` draws a rate from `rates` every episode; a canary
+    beside it fails at the same drawn rate. With `correlated` the risks share
+    one draw (so the worlds collapse to `rates`), otherwise they are drawn
+    independently (so there are ``len(rates) ** len(risks)`` worlds). The
+    reference orders defer each subset of the risky chains; the oracle picks the
+    best order per world, the no-information line the best single order over the
+    mix. The policy trains and is measured on the same mix, seeing only the one
+    shared degraded bit -- the point of the comparison.
+    """
+    canaries = canaries or tuple(None for _ in risks)
+    if len(canaries) != len(risks):
+        raise ValueError("canaries must match risks")
+    for name in (*risks, *(c for c in canaries if c is not None)):
+        if name not in catalog.ids():
+            raise ValueError(f"unknown ability: {name}")
+    scorer = _Scorer(catalog, outcomes)
+    best = bounds(catalog, outcomes, gamma=gamma).best_order
+
+    dependents = {
+        risk: {item for item in catalog.ids() if item == risk or _reaches(catalog, item, risk)}
+        for risk in risks
+    }
+
+    def order_deferring(subset: tuple[int, ...]) -> tuple[str, ...]:
+        deferred_ids: set[str] = set()
+        for index in subset:
+            deferred_ids |= dependents[risks[index]]
+        return tuple(
+            [item for item in best if item not in deferred_ids]
+            + [item for item in best if item in deferred_ids]
+        )
+
+    subsets = [
+        subset
+        for size in range(len(risks) + 1)
+        for subset in itertools.combinations(range(len(risks)), size)
+    ]
+    candidate_orders = {subset: order_deferring(subset) for subset in subsets}
+
+    if correlated:
+        worlds = [tuple(rate for _ in risks) for rate in rates]
+    else:
+        worlds = list(itertools.product(rates, repeat=len(risks)))
+    world_prob = 1.0 / len(worlds)
+
+    def rates_for(world: tuple[float, ...]) -> dict[str, float]:
+        drawn: dict[str, float] = {}
+        for index, risk in enumerate(risks):
+            drawn[risk] = world[index]
+            if canaries[index] is not None:
+                drawn[canaries[index]] = world[index]
+        return drawn
+
+    @functools.cache
+    def value(order: tuple[str, ...], world: tuple[float, ...]) -> float:
+        return sum(
+            _forced_order(catalog, scorer, order, 20_000 + t, rates_for(world), gamma)
+            for t in range(trials)
+        ) / trials
+
+    oracle = sum(
+        world_prob * max(value(order, world) for order in candidate_orders.values())
+        for world in worlds
+    )
+    no_information = max(
+        sum(world_prob * value(order, world) for world in worlds)
+        for order in candidate_orders.values()
+    )
+
+    def draw_world(rng: random.Random) -> tuple[float, ...]:
+        if correlated:
+            rate = rng.choice(rates)
+            return tuple(rate for _ in risks)
+        return tuple(rng.choice(rates) for _ in risks)
+
+    def play(
+        table: dict[tuple[str, str], float], seed: int, world: tuple[float, ...], greedy: bool
+    ) -> float:
+        coordinator = Coordinator(
+            catalog, planner_mode="rules", seed=seed, max_steps=len(catalog.ids()),
+            state_mode=state_mode,
+        )
+        coordinator.rl.q = table
+        if greedy:
+            coordinator.rl.epsilon = 0.0
+            _exploit_only(coordinator.rl)
+        executor = FaultInjector(_Replay(scorer), 0.0, seed=seed, rates=rates_for(world))
+        coordinator.start()
+        while (assignment := coordinator.next_assignment()) is not None:
+            coordinator.record_result(
+                executor.execute(catalog.get(assignment.ability_id), LabPolicy())
+            )
+        rewards = [
+            float(event.details["total"])
+            for event in coordinator.events
+            if event.event == "reward.scored"
+        ]
+        return discounted(rewards, gamma)
+
+    table: dict[tuple[str, str], float] = {}
+    trainer = random.Random(1)
+    for index in range(episodes):
+        play(table, index, draw_world(trainer), greedy=False)
+    grader = random.Random(2)
+    one_bit = sum(
+        play(dict(table), 30_000 + t, draw_world(grader), greedy=True)
+        for t in range(trials)
+    ) / trials
+    return MultiRiskBounds(no_information, oracle, one_bit, len(worlds))
 
 
 PROBE_ID = "observe-latent-canary"

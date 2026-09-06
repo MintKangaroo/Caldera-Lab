@@ -2726,3 +2726,30 @@ def test_a_dedicated_probe_is_declined_because_the_recon_already_reveals_the_ris
     assert value.probe_use == 0.0  # the learned policy never runs it
     assert value.probe_worth < 0  # forcing a probe-first order also loses
     assert value.probe_gain < 0.1  # having it on offer buys the policy nothing
+
+
+def test_independent_risks_leave_more_for_one_bit_to_miss(catalog: AbilityCatalog) -> None:
+    """One risk needed one bit. Several independent risks flip the same bit, so
+    it separates all-safe from something-failed but cannot say which fired --
+    and the right order differs by which one did. Correlated risks collapse to
+    one world axis the bit still names exactly; independent risks fan out into
+    more worlds and a wider informed ceiling. The convergence contrast (the bit
+    reaching the oracle when correlated, falling short when independent) needs
+    the full budget and lives in tests/probe_multi_risk.py; this checks the
+    problem is genuinely larger when the risks are independent."""
+    outcomes = _distinct_outcomes(catalog)
+    risks = ("collect-process-list", "collect-account-list")
+    canaries = ("collect-host-identity", "collect-system-info")
+    together = bench.multi_risk_bounds(
+        catalog, outcomes, risks, canaries=canaries, correlated=True,
+        episodes=1, trials=40,
+    )
+    apart = bench.multi_risk_bounds(
+        catalog, outcomes, risks, canaries=canaries, correlated=False,
+        episodes=1, trials=40,
+    )
+    assert together.worlds == 2 and apart.worlds == 4
+    # More worlds to tell apart is a strictly larger informed ceiling, and this
+    # holds from the reference orders alone, before any policy has converged.
+    assert apart.headroom > together.headroom
+    assert apart.oracle > together.oracle

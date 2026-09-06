@@ -359,3 +359,18 @@ probe_use~0.47이지만 gain 음수 — 남는 슬롯을 무의미하게 씀). �
 - 전체 예산 수렴은 `tests/probe_probe_value.py <log>`로 재현. CI에는 구조적 사실만
   (`test_the_pure_probe_reveals_nothing_and_only_costs_a_failure`,
   `test_a_dedicated_probe_is_declined_because_the_recon_already_reveals_the_risk`).
+
+### 다중 위험 / 다중 카나리아 (2026-09-07)
+
+단일 위험은 `degraded` 한 비트로 충분했습니다. 독립 위험이 둘이면? 두 사슬(process-list depth-2,
+account-list depth-1)에 위험+카나리아를 두고 위험별 독립 draw로 측정(`bench.multi_risk_bounds`
+→ `MultiRiskBounds`). 후보 순서는 위험 부분집합별 defer, oracle은 세계별 최선, no-info는 단일
+최선. 결론: **상관 위험은 한 비트로 오라클 도달(104%), 독립 위험은 71%에서 멈춤.** 비트가 아무
+실패로나 켜져 안전/불안전은 가르지만 어느 위험이 터졌는지는 못 지목 — 올바른 순서가 범인에 따라
+다르므로 ~29%를 놓칩니다. 즉 한 비트는 위험이 함께 움직일 때만 충분하고, 독립 위험 구분엔
+위험당 비트가 필요(단일 위험 교훈의 정반대; 거기선 둘째 비트가 수렴만 늦췄음). 위험당 비트를
+싣는 richer state는 아직 미구현(coordinator의 단일 `_outcome` 비트를 확장해야 함).
+
+- `bench.multi_risk_bounds(catalog, outcomes, risks, canaries=, correlated=, ...)` → `MultiRiskBounds`.
+- 재현 `tests/probe_multi_risk.py <log>`. CI엔 구조적 테스트
+  (`test_independent_risks_leave_more_for_one_bit_to_miss`).
