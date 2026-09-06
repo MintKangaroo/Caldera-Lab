@@ -337,3 +337,25 @@ caldera-lab run --fault-rate 0.2                           # 균일 (학습에�
 
 `bench.latent_risk_bounds(catalog, outcomes, ability, rates, canary=...)`가 세 기준선을
 계산합니다. 전체 예산 수렴은 `tests/probe_latent_canary.py <log>`로 재현.
+
+### 관찰에 한 단계를 쓸 가치가 있는가 (음성 결과, 2026-09-06)
+
+위 카나리아는 어차피 실행하는 실제 recon 읽기였습니다. 반대로 **관찰만을 위한 전용 probe**가
+한 단계 값어치를 하는지 물었습니다. 발견 가치 0 · 딸린 능력 0 · 위험과 같은 rate로 실패만 하는
+순수 probe를 카탈로그가 아니라 `bench` 안에서만 만들어(`bench._with_probe`), 단계 예산을 걸고
+에피소드별 위험(w=0.5)에서 측정했습니다(`bench.probe_value` → `ProbeValue`).
+
+결론: **정책은 전용 probe를 실행하지 않는 법을 배우고 그게 최적입니다.** 빠듯한 예산(6–10)에서
+`probe_use=0`, `gain≈0` — probe를 손에 쥐어줘도 얻는 게 없습니다. 강제 probe-first(`worth`)는
+언제나 손해. 위험이 depth 0(process-list)이든 depth 2(resolve-process-group)이든 동일합니다.
+이유: `degraded`는 아무 실패로나 켜지므로 **어차피 실행하는 recon이 이미 카나리아를 겸합니다.**
+관찰이 공짜라 한 단계를 따로 낼 이유가 없습니다. 이는 카나리아 결과의 역·완성입니다.
+
+측정 함정: 예산=full(12→13 augmented)은 선택 집합 크기가 달라져 잡음이 섞입니다(depth 0에서
+probe_use~0.47이지만 gain 음수 — 남는 슬롯을 무의미하게 씀). 깨끗한 측정은 예산 6–10.
+
+- `bench.probe_value(catalog, outcomes, risky, rates, weights=, budget=, ...)` → `ProbeValue`
+  (`.commit/.probe/.policy/.without_probe/.probe_use`, 파생 `.best_fixed/.probe_worth/.probe_gain`).
+- 전체 예산 수렴은 `tests/probe_probe_value.py <log>`로 재현. CI에는 구조적 사실만
+  (`test_the_pure_probe_reveals_nothing_and_only_costs_a_failure`,
+  `test_a_dedicated_probe_is_declined_because_the_recon_already_reveals_the_risk`).

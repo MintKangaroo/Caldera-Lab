@@ -16,12 +16,13 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 
-from .catalog import AbilityCatalog
+from .catalog import Ability, AbilityCatalog
 from .coordinator import Coordinator
 from .executor import ExecutionResult, FaultInjector
 from .facts import extract
 from .policy import LabPolicy
 from .reward import RewardModel
+from .rl import DEGRADED
 
 __all__ = [
     "Bounds",
@@ -35,6 +36,8 @@ __all__ = [
     "evaluate",
     "LatentRiskBounds",
     "latent_risk_bounds",
+    "ProbeValue",
+    "probe_value",
     "load_outcomes",
     "order_spread",
     "under_faults",
@@ -615,6 +618,270 @@ def latent_risk_bounds(
         for t in range(trials)
     ) / trials
     return LatentRiskBounds(no_information, oracle, measured)
+
+
+PROBE_ID = "observe-latent-canary"
+
+
+def _with_probe(
+    catalog: AbilityCatalog, outcomes: dict[str, str], probe_id: str
+) -> tuple[AbilityCatalog, dict[str, str]]:
+    """Append a pure probe to the catalog: a study construct, not a real ability.
+
+    The probe reads nothing (empty output, so zero information gain) and unlocks
+    nothing (no `produces`, so nothing depends on it and it depends on nothing).
+    Its only content is that it can be made to fail at the latent rate. That
+    isolates the question this experiment asks -- whether observing the risk is
+    worth a step -- from the ability's own value: a real recon read is run for
+    what it discovers regardless of the risk it also reveals, so it could never
+    show a policy *declining* to observe. This never enters `catalog/abilities.json`
+    and is never executed; it exists only inside the replay.
+    """
+    if probe_id in catalog.ids():
+        raise ValueError(f"probe id collides with a real ability: {probe_id}")
+    probe = Ability(
+        id=probe_id,
+        name="Latent-risk canary",
+        tactic="reconnaissance",
+        technique="T0000",
+        command=("true",),
+        description="Study-only probe: fails at the latent rate and reveals nothing.",
+        risk="low",
+    )
+    augmented = AbilityCatalog((*catalog.all(), probe), catalog.traits())
+    augmented._reject_unreachable()
+    augmented._depth = augmented._measure_depth()
+    return augmented, {**outcomes, probe_id: ""}
+
+
+def _degraded(state: str) -> bool:
+    """Read the failure bit the coordinator encodes at the tail of every state."""
+    return state.rsplit("|", 1)[-1] == DEGRADED
+
+
+def _commit_choose(order: tuple[str, ...], probe_id: str):  # noqa: ANN202
+    """Follow a fixed order and never spend a step on the probe."""
+    rank = {ability_id: index for index, ability_id in enumerate(order)}
+    never = len(order) + 1
+
+    def choose(state: str, candidates: tuple[str, ...]) -> str:
+        return min(candidates, key=lambda c: never if c == probe_id else rank.get(c, never - 1))
+
+    return choose
+
+
+def _probe_first_choose(  # noqa: ANN202
+    clean_order: tuple[str, ...], degraded_order: tuple[str, ...], probe_id: str
+):
+    """Probe first, then take the chain first if it looks safe, else defer it.
+
+    The probe is a candidate only until it is issued, so preferring it whenever
+    it appears runs it exactly once, at the start. After that the degraded bit
+    already in the state says which order to follow for the rest.
+    """
+    clean_rank = {ability_id: index for index, ability_id in enumerate(clean_order)}
+    degraded_rank = {ability_id: index for index, ability_id in enumerate(degraded_order)}
+    last = max(len(clean_order), len(degraded_order)) + 1
+
+    def choose(state: str, candidates: tuple[str, ...]) -> str:
+        if probe_id in candidates:
+            return probe_id
+        rank = degraded_rank if _degraded(state) else clean_rank
+        return min(candidates, key=lambda c: rank.get(c, last))
+
+    return choose
+
+
+def _budgeted_rollout(  # noqa: ANN202
+    catalog: AbilityCatalog,
+    scorer: _Scorer,
+    choose,
+    seed: int,
+    rates: dict[str, float],
+    gamma: float,
+    budget: int,
+    state_mode: str | None,
+    greedy: bool = False,
+    table: dict[tuple[str, str], float] | None = None,
+) -> tuple[float, set[str]]:
+    """Play one episode under a step budget; return its discounted value and what it issued."""
+    coordinator = Coordinator(
+        catalog,
+        policy=LabPolicy(max_steps=budget),
+        planner_mode="rules",
+        seed=seed,
+        state_mode=state_mode,
+    )
+    if table is not None:
+        coordinator.rl.q = table
+    if choose is not None:
+        coordinator.rl.choose = choose
+    elif greedy:
+        coordinator.rl.epsilon = 0.0
+        _exploit_only(coordinator.rl)
+    executor = FaultInjector(_Replay(scorer), 0.0, seed=seed, rates=rates)
+    coordinator.start()
+    while (assignment := coordinator.next_assignment()) is not None:
+        coordinator.record_result(
+            executor.execute(catalog.get(assignment.ability_id), LabPolicy())
+        )
+    rewards = [
+        float(event.details["total"])
+        for event in coordinator.events
+        if event.event == "reward.scored"
+    ]
+    issued = {
+        str(event.details["ability_id"])
+        for event in coordinator.events
+        if event.event == "ability.approved"
+    }
+    return discounted(rewards, gamma), issued
+
+
+@dataclass(frozen=True)
+class ProbeValue:
+    """Whether a policy should pay a step to observe a latent risk before acting.
+
+    `commit` never probes and commits to the chain-first order; `probe` always
+    spends the first step on the probe and then defers the risky chain when the
+    probe failed. `best_fixed` is the better of those two blind strategies for
+    this prior. `policy` is the trained tabular policy, and `probe_use` is the
+    share of its evaluated episodes that chose to run the probe -- the decision
+    itself, not just its payoff.
+    """
+
+    commit: float
+    probe: float
+    policy: float
+    without_probe: float
+    probe_use: float
+    budget: int
+
+    @property
+    def best_fixed(self) -> float:
+        return max(self.commit, self.probe)
+
+    @property
+    def probe_worth(self) -> float:
+        """How much the probe strategy beats committing blind. Negative: not worth it."""
+        return self.probe - self.commit
+
+    @property
+    def probe_gain(self) -> float:
+        """What having the probe on offer buys the trained policy over not having it.
+
+        Near zero means the policy gained nothing from a dedicated probe: the
+        recon it runs anyway already revealed the risk in time.
+        """
+        return self.policy - self.without_probe
+
+
+def probe_value(
+    catalog: AbilityCatalog,
+    outcomes: dict[str, str],
+    risky_ability: str,
+    rates: tuple[float, ...],
+    weights: tuple[float, ...] | None = None,
+    budget: int | None = None,
+    probe_id: str = PROBE_ID,
+    episodes: int = 12000,
+    trials: int = 400,
+    gamma: float = GAMMA,
+    state_mode: str | None = None,
+) -> ProbeValue:
+    """Measure whether spending a step to observe a latent risk pays, and if the
+    policy learns to make that call.
+
+    Each episode draws one of `rates` for `risky_ability` (and for the probe,
+    which fails with it), with probability `weights`. Under a step budget the
+    probe competes with real discoveries, so running it is a genuine cost: a
+    slot, plus the probe's own failure in a bad episode. Its benefit is the
+    degraded bit arriving before the risky chain is committed, so the doomed
+    chain can be deferred. The returned `ProbeValue` says what that trade is
+    worth (`probe_gain`, `probe_worth`) and whether the trained policy takes it
+    (`probe_use`).
+    """
+    if risky_ability not in catalog.ids():
+        raise ValueError(f"unknown ability: {risky_ability}")
+    weights = weights or tuple(1.0 for _ in rates)
+    if len(weights) != len(rates):
+        raise ValueError("weights must match rates")
+    augmented, augmented_outcomes = _with_probe(catalog, outcomes, probe_id)
+    if budget is None:
+        budget = len(augmented.ids())
+    scorer = _Scorer(augmented, augmented_outcomes)
+
+    best = bounds(catalog, outcomes, gamma=gamma).best_order
+    dependents = [
+        item
+        for item in catalog.ids()
+        if item == risky_ability or _reaches(catalog, item, risky_ability)
+    ]
+    deferred = tuple(
+        [item for item in best if item not in dependents]
+        + [item for item in best if item in dependents]
+    )
+
+    def rates_for(rate: float) -> dict[str, float]:
+        return {risky_ability: rate, probe_id: rate}
+
+    def draw(rng: random.Random) -> float:
+        return rng.choices(rates, weights=weights, k=1)[0]
+
+    def forced_average(choose) -> float:  # noqa: ANN001
+        rng = random.Random(101)
+        total = 0.0
+        for trial in range(trials):
+            rate = draw(rng)
+            value, _ = _budgeted_rollout(
+                augmented, scorer, choose, 40_000 + trial, rates_for(rate),
+                gamma, budget, state_mode,
+            )
+            total += value
+        return total / trials
+
+    commit = forced_average(_commit_choose(best, probe_id))
+    probe = forced_average(_probe_first_choose(best, deferred, probe_id))
+
+    table: dict[tuple[str, str], float] = {}
+    trainer = random.Random(1)
+    for index in range(episodes):
+        _budgeted_rollout(
+            augmented, scorer, None, index, rates_for(draw(trainer)),
+            gamma, budget, state_mode, table=table,
+        )
+    grader = random.Random(2)
+    returns = 0.0
+    probed = 0
+    for trial in range(trials):
+        value, issued = _budgeted_rollout(
+            augmented, scorer, None, 30_000 + trial, rates_for(draw(grader)),
+            gamma, budget, state_mode, greedy=True, table=dict(table),
+        )
+        returns += value
+        probed += int(probe_id in issued)
+
+    # The same policy with no probe on offer, so the gain from having it is
+    # measured against the recon the lab would run regardless.
+    bare_scorer = _Scorer(catalog, outcomes)
+    bare_budget = min(budget, len(catalog.ids()))
+    bare_table: dict[tuple[str, str], float] = {}
+    bare_trainer = random.Random(3)
+    for index in range(episodes):
+        _budgeted_rollout(
+            catalog, bare_scorer, None, index, {risky_ability: draw(bare_trainer)},
+            gamma, bare_budget, state_mode, table=bare_table,
+        )
+    bare_grader = random.Random(4)
+    bare_returns = sum(
+        _budgeted_rollout(
+            catalog, bare_scorer, None, 30_000 + trial, {risky_ability: draw(bare_grader)},
+            gamma, bare_budget, state_mode, greedy=True, table=dict(bare_table),
+        )[0]
+        for trial in range(trials)
+    ) / trials
+
+    return ProbeValue(commit, probe, returns / trials, bare_returns, probed / trials, budget)
 
 
 def _reaches(catalog: AbilityCatalog, item: str, source: str) -> bool:

@@ -2676,3 +2676,53 @@ def test_a_canary_shifts_both_reference_lines(catalog: AbilityCatalog) -> None:
     # different problem, not a relabelling.
     assert withc.no_information < without.no_information
     assert withc.headroom > 0
+
+
+def test_the_pure_probe_reveals_nothing_and_only_costs_a_failure(
+    catalog: AbilityCatalog,
+) -> None:
+    """The study probe is a step whose only content is that it can fail. It
+    reads nothing (empty output -> no information gain) and unlocks nothing (no
+    dependents), so scoring it is the success baseline when it passes and the
+    failure penalty when it does not -- nothing else."""
+    augmented, outcomes = bench._with_probe(catalog, {}, bench.PROBE_ID)
+    probe = augmented.get(bench.PROBE_ID)
+    assert augmented.depth(bench.PROBE_ID) == 0
+    assert probe.requires == () and probe.produces == ()
+    assert outcomes[bench.PROBE_ID] == ""  # reveals nothing
+    # Nothing in the catalog can come to depend on it.
+    assert not any(bench._reaches(augmented, item, bench.PROBE_ID) for item in augmented.ids())
+
+    model = RewardModel()
+    passed = model.score(
+        ExecutionResult(bench.PROBE_ID, "succeeded", "", "", 0, "replay", 0.0),
+        LabPolicy(), probe, depth=0,
+    )
+    failed = RewardModel().score(
+        ExecutionResult(bench.PROBE_ID, "failed", "", "", 1, "replay", 0.0),
+        LabPolicy(), probe, depth=0,
+    )
+    assert passed.information_gain == 0.0
+    assert passed.total == pytest.approx(model.success_reward)
+    assert failed.total == pytest.approx(model.failure_penalty)
+
+
+def test_a_dedicated_probe_is_declined_because_the_recon_already_reveals_the_risk(
+    catalog: AbilityCatalog,
+) -> None:
+    """Whether to spend a step observing the latent risk. A real recon read that
+    co-fails is a free canary (the previous test's finding); a step whose only
+    job is to observe is not. Any failure flips the one degraded bit, so the
+    recon the lab runs regardless already carries the signal, and a dedicated
+    probe adds only its slot and its own failure. Under a scarce budget the
+    trained policy declines it and loses nothing. Convergence needs the full
+    training budget, so the measured numbers live in tests/probe_probe_value.py;
+    this checks the direction with a small budget."""
+    outcomes = _distinct_outcomes(catalog)
+    value = bench.probe_value(
+        catalog, outcomes, "collect-process-list", (0.0, 0.9),
+        weights=(0.5, 0.5), budget=6, episodes=800, trials=80,
+    )
+    assert value.probe_use == 0.0  # the learned policy never runs it
+    assert value.probe_worth < 0  # forcing a probe-first order also loses
+    assert value.probe_gain < 0.1  # having it on offer buys the policy nothing
