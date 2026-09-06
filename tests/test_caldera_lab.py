@@ -2753,3 +2753,22 @@ def test_independent_risks_leave_more_for_one_bit_to_miss(catalog: AbilityCatalo
     # holds from the reference orders alone, before any policy has converged.
     assert apart.headroom > together.headroom
     assert apart.oracle > together.oracle
+
+
+def test_a_committed_order_is_stale_when_the_risk_mix_shifts(catalog: AbilityCatalog) -> None:
+    """A shift in the risk distribution across a mix where the optimal order
+    flips. A policy that commits to one order for the mix it learned is stale
+    once the mix crosses the flip: the best single order for the before mix
+    scores worse on the after mix than the best single order for the after mix.
+    This is a property of the reference orders and holds before any policy
+    converges. That the RL policy escapes it -- reordering within an episode on
+    the risky ability's own failure, so its choice never depended on the mix --
+    is a convergence result and lives in tests/probe_nonstationary.py."""
+    outcomes = _distinct_outcomes(catalog)
+    shift = bench.nonstationary_risk(
+        catalog, outcomes, "collect-process-list", before_high=0.2, after_high=0.8,
+        episodes=200, trials=60,
+    )
+    # The committed order for the before mix is the wrong one after the shift.
+    assert shift.commit_stale < shift.commit_adapted
+    assert shift.commit_relearning > 0

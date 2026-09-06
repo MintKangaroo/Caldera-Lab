@@ -374,3 +374,25 @@ account-list depth-1)에 위험+카나리아를 두고 위험별 독립 draw로 
 - `bench.multi_risk_bounds(catalog, outcomes, risks, canaries=, correlated=, ...)` → `MultiRiskBounds`.
 - 재현 `tests/probe_multi_risk.py <log>`. CI엔 구조적 테스트
   (`test_independent_risks_leave_more_for_one_bit_to_miss`).
+
+### 비정상(non-stationary) 위험 (2026-09-07)
+
+위험 분포가 시간에 따라 이동하면? 매 실행 안전/위험을 뽑되 위험 확률이 중간에 이동(0.2→0.8),
+최적 순서 뒤집힘 지점(~0.30)을 가로지름(`bench.nonstationary_risk` → `NonstationaryRisk`).
+before/after mix로 학습·선택한 것을 after mix에서 채점. 결론(12000 ep): **고정 순서(commit)는
+stale이 되어 재학습 +1.17 손실, RL은 재학습 ≈ 0(강건).** RL은 mix에 커밋하지 않고 에피소드 내에서
+위험 근원의 자체 실패를 읽어 적응하므로("위험 근원=자기 카나리아"의 귀결) 분포 이동에 무너지지
+않음. stale RL(6.98)이 after용 최선 고정 순서(6.94)도 넘음. 단 강건성은 수렴 속성(초기엔 RL도
+commit만큼 취약). 이 실험으로 probe/canary/multi-risk 발견이 통합됨: 에피소드 내 적응성이
+핵심 축.
+
+주의(측정 함정 기록): 초기 시도들이 틀렸음 — (1) regret을 두 고정 순서 max로 재면 적응 정책이
+그걸 넘어 음수 regret 발생(정책은 두 순서에 안 갇힘). (2) 온라인 epsilon 탐험 regret이 이동
+신호를 묻음. 해법: greedy return 직접 비교, oracle 미사용. (3) 고정 rate가 이동하는 프레이밍은
+카나리아 무의미(고정 rate 주변 노이즈일 뿐) — 에피소드별 draw의 **혼합 확률**이 이동해야 의미.
+canary 파라미터는 결국 제거(위험 근원이 이미 카나리아라 불필요).
+
+- `bench.nonstationary_risk(catalog, outcomes, risky, before_high, after_high, ...)` → `NonstationaryRisk`
+  (`.rl_stale/.rl_adapted/.commit_stale/.commit_adapted`, 파생 `.rl_relearning/.commit_relearning`).
+- 재현 `tests/probe_nonstationary.py <log>`. CI엔 구조적 테스트
+  (`test_a_committed_order_is_stale_when_the_risk_mix_shifts`).

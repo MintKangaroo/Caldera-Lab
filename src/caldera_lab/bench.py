@@ -39,6 +39,8 @@ __all__ = [
     "latent_risk_bounds",
     "MultiRiskBounds",
     "multi_risk_bounds",
+    "NonstationaryRisk",
+    "nonstationary_risk",
     "ProbeValue",
     "probe_value",
     "load_outcomes",
@@ -780,6 +782,145 @@ def multi_risk_bounds(
         for t in range(trials)
     ) / trials
     return MultiRiskBounds(no_information, oracle, one_bit, len(worlds))
+
+
+@dataclass(frozen=True)
+class NonstationaryRisk:
+    """Whether within-episode adaptivity survives a shift in the risk mix.
+
+    Each episode draws a low or a high rate; the probability of the high one
+    shifts partway through, and the optimal order flips with the drawn rate.
+    The mix therefore decides which single order a *prior-committed* policy
+    should pick -- and when the mix crosses the flip point, the order it
+    committed to before is now the wrong one.
+
+    Two learners are trained on the before mix and graded on the after mix,
+    against learners trained on the after mix. The RL policy is free to reorder
+    within an episode (it reads the risky ability's own outcome, the canary it
+    already carries); the commit policy is the best single order for its mix.
+    """
+
+    rl_stale: float
+    """RL trained on the before mix, graded on the after mix."""
+    rl_adapted: float
+    """RL trained on the after mix, graded on the after mix."""
+    commit_stale: float
+    """Best single order for the before mix, on the after mix."""
+    commit_adapted: float
+    """Best single order for the after mix, on the after mix."""
+
+    @property
+    def rl_relearning(self) -> float:
+        """What re-training the RL policy on the new mix recovers. Near zero means
+        the shift cost it nothing -- it was already adapting per episode."""
+        return self.rl_adapted - self.rl_stale
+
+    @property
+    def commit_relearning(self) -> float:
+        """What re-choosing the committed order recovers -- the cost of staleness
+        for a policy that cannot adapt within an episode."""
+        return self.commit_adapted - self.commit_stale
+
+
+def nonstationary_risk(
+    catalog: AbilityCatalog,
+    outcomes: dict[str, str],
+    risky_ability: str,
+    before_high: float,
+    after_high: float,
+    low_rate: float = 0.0,
+    high_rate: float = 0.9,
+    episodes: int = 12000,
+    trials: int = 400,
+    gamma: float = GAMMA,
+    state_mode: str | None = None,
+) -> NonstationaryRisk:
+    """Measure whether a converged policy is robust to a shift in the risk mix.
+
+    Every episode draws `high_rate` with some probability, else `low_rate`; the
+    optimal order flips with the drawn rate (chain-first when low, the risky
+    chain deferred when high). The mix decides which single order a
+    prior-committed policy should pick. This trains an RL policy and picks a
+    best committed order on each of `before_high` and `after_high`, then grades
+    both on the after mix: the before-trained ones are stale, and the gap to the
+    after-trained ones is what re-learning recovers. The RL policy can reorder
+    within an episode on the risky ability's own failure, so it need not commit
+    to the mix; the comparison is how much that spares it when the mix shifts.
+    """
+    if risky_ability not in catalog.ids():
+        raise ValueError(f"unknown ability: {risky_ability}")
+    scorer = _Scorer(catalog, outcomes)
+    best = bounds(catalog, outcomes, gamma=gamma).best_order
+    dependents = [
+        item
+        for item in catalog.ids()
+        if item == risky_ability or _reaches(catalog, item, risky_ability)
+    ]
+    deferred = tuple(
+        [item for item in best if item not in dependents]
+        + [item for item in best if item in dependents]
+    )
+
+    def rates_for(rate: float) -> dict[str, float]:
+        return {risky_ability: rate}
+
+    def play(
+        table: dict[tuple[str, str], float], seed: int, rate: float, greedy: bool
+    ) -> float:
+        coordinator = Coordinator(
+            catalog, planner_mode="rules", seed=seed, max_steps=len(catalog.ids()),
+            state_mode=state_mode,
+        )
+        coordinator.rl.q = table
+        if greedy:
+            coordinator.rl.epsilon = 0.0
+            _exploit_only(coordinator.rl)
+        executor = FaultInjector(_Replay(scorer), 0.0, seed=seed, rates=rates_for(rate))
+        coordinator.start()
+        while (assignment := coordinator.next_assignment()) is not None:
+            coordinator.record_result(
+                executor.execute(catalog.get(assignment.ability_id), LabPolicy())
+            )
+        rewards = [
+            float(event.details["total"])
+            for event in coordinator.events
+            if event.event == "reward.scored"
+        ]
+        return discounted(rewards, gamma)
+
+    def rate_of(high: float, picker: random.Random) -> float:
+        return high_rate if picker.random() < high else low_rate
+
+    @functools.cache
+    def forced_on(order: tuple[str, ...], rate: float) -> float:
+        return sum(
+            _forced_order(catalog, scorer, order, 20_000 + t, rates_for(rate), gamma)
+            for t in range(trials)
+        ) / trials
+
+    def commit_on(order: tuple[str, ...], high: float) -> float:
+        return high * forced_on(order, high_rate) + (1 - high) * forced_on(order, low_rate)
+
+    def best_commit(high: float) -> tuple[str, ...]:
+        return max((best, deferred), key=lambda order: commit_on(order, high))
+
+    def rl_on(train_high: float, grade_high: float) -> float:
+        table: dict[tuple[str, str], float] = {}
+        trainer = random.Random(1)
+        for index in range(episodes):
+            play(table, index, rate_of(train_high, trainer), greedy=False)
+        grader = random.Random(2)
+        return sum(
+            play(dict(table), 30_000 + trial, rate_of(grade_high, grader), greedy=True)
+            for trial in range(trials)
+        ) / trials
+
+    return NonstationaryRisk(
+        rl_stale=rl_on(before_high, after_high),
+        rl_adapted=rl_on(after_high, after_high),
+        commit_stale=commit_on(best_commit(before_high), after_high),
+        commit_adapted=commit_on(best_commit(after_high), after_high),
+    )
 
 
 PROBE_ID = "observe-latent-canary"
