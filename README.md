@@ -6,9 +6,10 @@
 
 ## 현재 상태
 
-MVP 구현이 완료되어 `main` 브랜치에 반영되어 있습니다. Docker 이미지 빌드와 non-root
-격리 에이전트의 실제 2단계 실행을 확인했고, 테스트 6개와 Ruff 검사를 통과했습니다.
-대시보드에는 7번째 프로젝트인 Caldera Lab으로 등록되어 있습니다.
+능력 11개(technique 8개)를 실제 Docker 컨테이너에서 실행하며, 그중 3개는 앞선 능력이
+발견한 값 없이는 실행되지 않습니다. 테스트 167개와 Ruff, 그리고 실제 컨테이너를 띄워
+감사 로그를 검증하는 CI가 통과합니다. 대시보드에 Caldera Lab으로 등록되어 있고
+`.runtime/status.json`으로 실행 결과를 게시합니다.
 
 다음 세션은 저장소의 [`HANDOFF.md`](HANDOFF.md)를 먼저 읽고 이어서 진행하세요. 현재
 범위는 안전한 discovery 능력에 한정된 연구용 기반이며, 능력을 추가할 때는 catalog,
@@ -493,6 +494,7 @@ Status publishing  -> run 후 status.json 생성, 대시보드가 8/8 커버리�
 
 ```text
 Caldera_Lab/
+├── LICENSE                      # MIT
 ├── SECURITY.md                  # 안전 경계와 능력 추가 절차
 ├── .github/scripts/check_smoke.py  # CI 감사 로그 검증
 ├── catalog/abilities.json       # 허용된 능력 선언
@@ -509,3 +511,10 @@ Caldera_Lab/
 ├── src/caldera_lab/executor.py  # Docker/local/dry-run executor
 └── src/caldera_lab/orchestrator.py
 ```
+
+## 라이선스
+
+[MIT](LICENSE). `AI_Security_Lab`의 다른 저장소와 동일합니다.
+
+라이선스는 재사용 조건을 정할 뿐 오용을 막지 않습니다. 이 저장소에서 경계를 만드는 것은
+[`SECURITY.md`](SECURITY.md)에 적힌 제약과 그것을 강제하는 테스트입니다.

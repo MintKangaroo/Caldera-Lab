@@ -236,7 +236,9 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
    상한으로 삼았고(실제 최적이 아님), 시뮬레이션 출력이 능력 간에 줄을 공유해 보상을
    왜곡했습니다. 지금 수치는 실제 docker 실행 출력과 DP 최적 기준입니다.
 
-10. **LICENSE 미정**: 아직 없습니다. 공개 저장소이므로 선택이 필요합니다.
+10. ~~**LICENSE 미정**~~: MIT로 결정. 저작권자는 형제 저장소 다수와 맞춰
+   `AI Security Lab`입니다. `pyproject.toml`은 PEP 639 형식(`license = "MIT"` +
+   `license-files`)을 쓰므로 `setuptools>=77`이 필요합니다.
 
 ## 7. 시작 전 확인 명령
 
