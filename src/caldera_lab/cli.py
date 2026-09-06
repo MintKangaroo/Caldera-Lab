@@ -213,7 +213,9 @@ def main(argv: list[str] | None = None) -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="plan and execute an isolated lab run")
     run.add_argument("--executor", choices=("docker", "local", "dry-run"), default="docker")
-    run.add_argument("--planner", choices=("rules", "llm", "hybrid"), default="hybrid")
+    run.add_argument(
+        "--planner", choices=("rules", "llm", "claude", "hybrid"), default="hybrid"
+    )
     run.add_argument("--steps", type=positive_int, default=4)
     run.add_argument("--log", type=Path, default=Path(".runtime/run.jsonl"))
     run.add_argument(
@@ -242,7 +244,9 @@ def main(argv: list[str] | None = None) -> None:
         "serve", help="run the loopback beacon server and drive one agent through it"
     )
     serve.add_argument("--executor", choices=("docker", "local", "dry-run"), default="docker")
-    serve.add_argument("--planner", choices=("rules", "llm", "hybrid"), default="hybrid")
+    serve.add_argument(
+        "--planner", choices=("rules", "llm", "claude", "hybrid"), default="hybrid"
+    )
     serve.add_argument("--steps", type=positive_int, default=4)
     serve.add_argument(
         "--agents", type=positive_int, default=1, help="agents beaconing concurrently"

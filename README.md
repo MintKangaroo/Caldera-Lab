@@ -73,7 +73,41 @@ catalog의 ID만 반환합니다. 엔드포인트는 운영자가 바꿀 수 있
 
 fallback 사유는 `no_api_key`, `transport_error`, `http_<code>`, `invalid_json_body`,
 `invalid_json_output`, `output_not_an_object`, `missing_ability_ids`, `no_allowlisted_ids`,
-`no_text_in_response`입니다.
+`no_text_in_response`, `sdk_not_installed`, `refusal`입니다.
+
+### Claude planner
+
+`--planner claude`는 공식 Anthropic SDK로 Claude에 계획을 요청합니다. `ANTHROPIC_API_KEY`가
+필요하고, 모델은 `CALDERA_CLAUDE_MODEL`(기본 `claude-opus-5`)로 바꿉니다. SDK는 선택적
+의존성입니다 — 랩의 실행 경로 자체는 의존성이 없고, 닿을 수 없는 planner는 실패가 아니라
+fallback이므로 패키지가 없으면 `sdk_not_installed`로 감사됩니다.
+
+```bash
+pip install -e ".[claude]"
+ANTHROPIC_API_KEY=... caldera-lab run --planner claude --steps 6
+```
+
+**실제 키로 검증한 결과, Claude는 이 랩의 계획 요청을 거부합니다.**
+
+```text
+stop_reason: refusal   category: cyber
+```
+
+능력 목록과 실행 맥락(격리 컨테이너, 네트워크 없음, read-only, 고정 allowlist)을 모두
+기술한 프롬프트에서도 동일했습니다. 표현을 바꿔가며 분류기 판단을 우회하지 않았고, API가
+제공하는 server-side fallback으로 다른 모델에 라우팅하지도 않았습니다.
+
+거부 자체보다 중요한 것은 랩이 그때 무엇을 했는가입니다.
+
+```text
+plan.created  source=rules
+              fallback_reason=refusal
+              fallback_detail=category='cyber' ...
+              attempt_1/attempt_2 각각 사유와 지연시간 기록
+```
+
+실행은 멈추지 않고 규칙 planner로 내려갔고, 사유가 감사 로그에 남았습니다. stub 테스트로는
+얻을 수 없던 검증입니다 — 설계한 fallback 경로가 실제 거부에 대해 의도대로 동작했습니다.
 
 개발 중 Docker 없이 흐름만 확인하려면:
 
@@ -430,7 +464,7 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 161 passed
+pytest             -> 167 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
@@ -451,6 +485,7 @@ RL 순서 학습       -> 상태를 fact 기반으로 바꾼 뒤 12000 에피소
 Q table 전이       -> 순차 학습 table의 동시 실행 적중률 38% -> 75%
 Agent starvation   -> 98% -> 0% (200회 시행), 교착 없음
 GitHub Actions     -> success (quality 3.10/3.12 + docker-smoke)
+Claude planner     -> 실제 키로 end-to-end 확인. refusal(cyber)로 거부되며 rules로 fallback
 Status publishing  -> run 후 status.json 생성, 대시보드가 8/8 커버리지로 읽음
 ```
 

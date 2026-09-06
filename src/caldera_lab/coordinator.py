@@ -9,7 +9,7 @@ from .catalog import AbilityCatalog
 from .clock import now
 from .executor import SUCCESS_STATUSES, ExecutionResult
 from .facts import FactStore, bind, extract
-from .planner import LLMPlanner, Plan, RulePlanner
+from .planner import ClaudePlanner, LLMPlanner, Plan, RulePlanner
 from .policy import LabPolicy
 from .reward import RewardModel
 from .rl import CLEAN, DEGRADED, QPolicy
@@ -34,6 +34,15 @@ class Event:
     run_id: str
     event: str
     details: dict[str, object]
+
+
+def _make_planner(catalog: AbilityCatalog, mode: str):  # noqa: ANN202 - one of three
+    """Pick a planner. Every model-backed one falls back to the rules planner."""
+    if mode == "claude":
+        return ClaudePlanner(catalog)
+    if mode in {"llm", "hybrid"}:
+        return LLMPlanner(catalog)
+    return RulePlanner(catalog)
 
 
 def _permitted(policy: LabPolicy, catalog: AbilityCatalog, ability_id: str, index: int) -> bool:
@@ -69,9 +78,7 @@ class Coordinator:
         # An agent may be held to a narrower policy than the lab default, so a
         # less trusted agent cannot be handed everything the catalog allows.
         self.agent_policies: dict[str, LabPolicy] = dict(agent_policies or {})
-        self.planner = (
-            LLMPlanner(catalog) if planner_mode in {"llm", "hybrid"} else RulePlanner(catalog)
-        )
+        self.planner = _make_planner(catalog, planner_mode)
         self.rl = (
             QPolicy(catalog, seed=seed)
             if state_mode is None

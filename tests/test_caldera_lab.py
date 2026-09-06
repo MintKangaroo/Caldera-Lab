@@ -28,7 +28,7 @@ from caldera_lab.executor import (
 )
 from caldera_lab.facts import FactRejected, extract, resolve
 from caldera_lab.orchestrator import Orchestrator
-from caldera_lab.planner import LLMPlanner, RulePlanner
+from caldera_lab.planner import ClaudePlanner, LLMPlanner, RulePlanner
 from caldera_lab.policy import LabPolicy
 from caldera_lab.report import (
     STATUS_SCHEMA,
@@ -2066,3 +2066,119 @@ def test_a_full_sweep_pays_the_same_total_whatever_the_order() -> None:
         for i, d in reversed(order)
     )
     assert forward == pytest.approx(backward)
+
+
+class _Block:
+    def __init__(self, text: str) -> None:
+        self.type = "text"
+        self.text = text
+
+
+class _Usage:
+    input_tokens = 11
+    output_tokens = 22
+
+
+class _Response:
+    def __init__(self, text: str = "", stop_reason: str = "end_turn", details: str = "") -> None:
+        self.content = [_Block(text)] if text else []
+        self.stop_reason = stop_reason
+        self.stop_details = details
+        self.usage = _Usage()
+
+
+class _StubClient:
+    """Stands in for anthropic.Anthropic."""
+
+    def __init__(self, response: object = None, error: Exception | None = None) -> None:
+        self._response = response
+        self._error = error
+        self.calls: list[dict[str, object]] = []
+        self.messages = self
+
+    def create(self, **kwargs: object) -> object:
+        self.calls.append(kwargs)
+        if self._error is not None:
+            raise self._error
+        return self._response
+
+
+def _claude(catalog: AbilityCatalog, client: object, monkeypatch) -> ClaudePlanner:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    return ClaudePlanner(catalog, client=client, attempts=1)
+
+
+def test_claude_planner_keeps_only_allowlisted_ids(
+    catalog: AbilityCatalog, monkeypatch
+) -> None:
+    body = json.dumps(
+        {
+            "ability_ids": ["collect-process-list", "rm -rf /", "inspect-process-status"],
+            "rationale": "pid first",
+        }
+    )
+    client = _StubClient(_Response(body))
+    plan = _claude(catalog, client, monkeypatch).plan((), 4)
+    assert plan.source == "llm"
+    assert plan.ability_ids == ("collect-process-list", "inspect-process-status")
+    usage = plan.diagnostics["attempt_1"]["usage"]
+    assert usage["rejected_ability_ids"] == ["rm -rf /"]
+
+
+def test_claude_planner_is_told_the_dependencies_but_never_returns_a_command(
+    catalog: AbilityCatalog, monkeypatch
+) -> None:
+    body = json.dumps({"ability_ids": ["collect-process-list"], "rationale": "r"})
+    client = _StubClient(_Response(body))
+    _claude(catalog, client, monkeypatch).plan((), 4)
+    sent = json.loads(client.calls[0]["messages"][0]["content"])
+    listed = {entry["id"]: entry for entry in sent["allowed_abilities"]}
+    assert listed["inspect-process-status"]["requires"] == ["host.process.pid"]
+    assert listed["collect-process-list"]["produces"] == ["host.process.pid"]
+    # The schema pins the answer to catalog ids at the API boundary too.
+    schema = client.calls[0]["output_config"]["format"]["schema"]
+    assert schema["properties"]["ability_ids"]["items"]["enum"] == list(catalog.ids())
+
+
+def test_claude_planner_records_a_refusal_and_falls_back(
+    catalog: AbilityCatalog, monkeypatch
+) -> None:
+    """Verified against the real API: Claude declines to plan for this lab
+    under its cyber policy, on a terse framing and a fully contextual one
+    alike. The run has to continue on the rule planner with the reason kept."""
+    client = _StubClient(_Response(stop_reason="refusal", details="category=cyber"))
+    plan = _claude(catalog, client, monkeypatch).plan((), 4)
+    assert plan.source == "rules"
+    assert plan.diagnostics["fallback_reason"] == "refusal"
+    assert "cyber" in str(plan.diagnostics["fallback_detail"])
+    assert plan.ability_ids  # the lab still has work to do
+
+
+def test_claude_planner_maps_an_api_error_onto_an_audited_reason(
+    catalog: AbilityCatalog, monkeypatch
+) -> None:
+    error = RuntimeError("rate limited")
+    error.status_code = 429
+    plan = _claude(catalog, _StubClient(error=error), monkeypatch).plan((), 4)
+    assert plan.diagnostics["fallback_reason"] == "http_429"
+
+
+def test_claude_planner_without_the_sdk_is_a_fallback_not_a_crash(
+    catalog: AbilityCatalog, monkeypatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    planner = ClaudePlanner(catalog, attempts=1)
+    with mock.patch.dict("sys.modules", {"anthropic": None}):
+        plan = planner.plan((), 4)
+    assert plan.source == "rules"
+    assert plan.diagnostics["fallback_reason"] == "sdk_not_installed"
+
+
+def test_claude_planner_without_a_key_never_calls_out(
+    catalog: AbilityCatalog, monkeypatch
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    client = _StubClient(_Response("{}"))
+    plan = ClaudePlanner(catalog, client=client, attempts=1).plan((), 4)
+    assert plan.diagnostics["fallback_reason"] == "no_api_key"
+    assert client.calls == []

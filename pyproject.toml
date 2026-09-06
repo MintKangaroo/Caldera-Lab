@@ -11,6 +11,9 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5"]
+# The lab's own execution path has no dependencies. Only the Claude planner
+# needs this, and it degrades to the rule planner when it is absent.
+claude = ["anthropic>=1.0"]
 
 [project.scripts]
 caldera-lab = "caldera_lab.cli:main"
