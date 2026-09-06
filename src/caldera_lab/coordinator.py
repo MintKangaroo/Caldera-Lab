@@ -97,6 +97,7 @@ class Coordinator:
         self._outcome = CLEAN
         self._issued = 0
         self._pending: dict[str, tuple[str, str]] = {}
+        self._attempts: dict[str, int] = {}
         self._started = False
         # Facts unlock abilities, which is what makes the order of a run matter.
         self.facts = FactStore()
@@ -253,6 +254,7 @@ class Coordinator:
             ability_id = self.rl.choose(state, permitted)
             policy.validate(self.catalog, ability_id, index)
             self._used.add(ability_id)
+            self._attempts[ability_id] = self._attempts.get(ability_id, 0) + 1
             self._issued += 1
             self._pending[f"{agent_id}:{ability_id}"] = (state, ability_id)
             ability = self.catalog.get(ability_id)
@@ -266,6 +268,7 @@ class Coordinator:
                     "technique": ability.technique,
                     "policy": "agent" if agent_id in self.agent_policies else "lab",
                     "bindings": dict(bindings),
+                    "attempt": self._attempts[ability_id],
                 },
             )
             return Assignment(ability_id, bindings)
@@ -317,6 +320,21 @@ class Coordinator:
             )
             if result.status not in SUCCESS_STATUSES:
                 self._outcome = DEGRADED
+                # A failure produced nothing, so the ability is not spent. Put
+                # it back within its attempt budget and let the policy decide
+                # whether trying again is worth a step.
+                attempts = self._attempts.get(ability_id, 1)
+                if attempts < self.policy_for(agent_id).max_attempts:
+                    self._used.discard(ability_id)
+                    self._emit(
+                        "ability.retryable",
+                        {
+                            "agent_id": agent_id,
+                            "ability_id": ability_id,
+                            "attempts": attempts,
+                            "max_attempts": self.policy_for(agent_id).max_attempts,
+                        },
+                    )
             next_state = self._state()
             self.rl.update(
                 state,

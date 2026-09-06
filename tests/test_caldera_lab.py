@@ -2527,3 +2527,86 @@ def test_run_cli_injects_a_declared_fault(tmp_path: Path) -> None:
     spoiled = [row for row in completed if row["status"] == "failed"]
     assert [row["ability_id"] for row in spoiled] == ["collect-process-list"]
     assert spoiled[0]["injected"] is True
+
+
+def _injected_failure(ability_id: str) -> ExecutionResult:
+    return ExecutionResult(ability_id, "failed", "", "injected", 1, "docker", 0.1, injected=True)
+
+
+def test_a_failure_is_final_by_default(catalog: AbilityCatalog) -> None:
+    """One attempt is what a run looks like when nothing can fail, which is
+    every run this lab made before failures could be injected."""
+    coordinator = Coordinator(catalog, planner_mode="rules", max_steps=len(catalog.ids()))
+    coordinator.start()
+    first = coordinator.next_ability()
+    coordinator.record_result(_injected_failure(first))
+    assert first not in coordinator._candidates()
+    assert not [e for e in coordinator.events if e.event == "ability.retryable"]
+
+
+def test_a_failed_ability_can_be_offered_again(catalog: AbilityCatalog) -> None:
+    """A failure produced nothing, so the ability is not spent. Whether trying
+    again is worth a step is then a decision the policy makes."""
+    coordinator = Coordinator(
+        catalog, planner_mode="rules", policy=LabPolicy(max_attempts=2),
+        max_steps=len(catalog.ids()),
+    )
+    coordinator.start()
+    first = coordinator.next_ability()
+    coordinator.record_result(_injected_failure(first))
+    assert first in coordinator._candidates()
+    retryable = [e for e in coordinator.events if e.event == "ability.retryable"]
+    assert [e.details["ability_id"] for e in retryable] == [first]
+    assert retryable[0].details["attempts"] == 1
+
+
+def test_a_retry_spends_a_step_and_is_audited_as_one(catalog: AbilityCatalog) -> None:
+    coordinator = Coordinator(
+        catalog, planner_mode="rules", policy=LabPolicy(max_attempts=3),
+        max_steps=len(catalog.ids()),
+    )
+    coordinator.start()
+    first = coordinator.next_ability()
+    coordinator.record_result(_injected_failure(first))
+    issued_before = coordinator._issued
+    coordinator.rl.choose = lambda state, candidates, _p=first: _p
+    assert coordinator.next_ability() == first
+    assert coordinator._issued == issued_before + 1
+    attempts = [
+        e.details["attempt"]
+        for e in coordinator.events
+        if e.event == "ability.approved" and e.details["ability_id"] == first
+    ]
+    assert attempts == [1, 2]
+
+
+def test_the_attempt_budget_is_a_ceiling(catalog: AbilityCatalog) -> None:
+    coordinator = Coordinator(
+        catalog, planner_mode="rules", policy=LabPolicy(max_attempts=2),
+        max_steps=len(catalog.ids()),
+    )
+    coordinator.start()
+    first = coordinator.next_ability()
+    coordinator.record_result(_injected_failure(first))
+    coordinator.rl.choose = lambda state, candidates, _p=first: _p
+    coordinator.next_ability()
+    coordinator.record_result(_injected_failure(first))
+    assert first not in coordinator._candidates()
+
+
+def test_run_cli_takes_an_attempt_budget(tmp_path: Path) -> None:
+    log = tmp_path / "run.jsonl"
+    cli.main([
+        "run", "--executor", "dry-run", "--steps", "12", "--no-q-table",
+        "--log", str(log), "--max-attempts", "3",
+        "--fault-ability", "collect-host-identity=1.0",
+    ])
+    events = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    attempts = [
+        record["details"]["attempt"]
+        for record in events
+        if record["event"] == "ability.approved"
+        and record["details"]["ability_id"] == "collect-host-identity"
+    ]
+    # Always fails, so it is offered again until the budget is spent.
+    assert attempts == [1, 2, 3]

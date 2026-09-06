@@ -263,6 +263,7 @@ def evaluate(
     seed: int = 0,
     fault_rate: float = 0.0,
     fault_rates: dict[str, float] | None = None,
+    max_attempts: int = 1,
     table: dict[tuple[str, str], float] | None = None,
 ) -> tuple[float, tuple[str, ...]]:
     """Train for `episodes`, then measure one greedy run over recorded output.
@@ -280,7 +281,7 @@ def evaluate(
     def episode(greedy: bool, policy_seed: int) -> tuple[float, tuple[str, ...]]:
         coordinator = Coordinator(
             catalog, planner_mode="rules", seed=policy_seed, max_steps=limit,
-            state_mode=state_mode,
+            state_mode=state_mode, policy=LabPolicy(max_attempts=max_attempts),
         )
         coordinator.rl.q = table
         if greedy:
@@ -317,6 +318,7 @@ def under_faults(
     state_mode: str | None = None,
     gamma: float = GAMMA,
     fault_rates: dict[str, float] | None = None,
+    max_attempts: int = 1,
 ) -> float:
     """Mean discounted return of an already-trained policy across fault draws.
 
@@ -329,7 +331,7 @@ def under_faults(
         value, _ = evaluate(
             catalog, outcomes, episodes=0, state_mode=state_mode, gamma=gamma,
             seed=10_000 + trial, fault_rate=fault_rate, fault_rates=fault_rates,
-            table=dict(table),
+            max_attempts=max_attempts, table=dict(table),
         )
         total += value
     return total / trials if trials else 0.0

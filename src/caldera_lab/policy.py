@@ -14,6 +14,13 @@ class LabPolicy:
     allowed_risks: frozenset[str] = field(default_factory=lambda: frozenset({"low"}))
     approved_abilities: frozenset[str] | None = None
     """When set, only these ability IDs may run even if the catalog allows more."""
+    max_attempts: int = 1
+    """How many times one ability may be attempted in a run.
+
+    One means a failure is final, which is what a run looks like when nothing
+    can fail. Above one the lab may try again, and that is a decision rather
+    than a reflex: a retry spends a step that something else could have used.
+    """
 
     def validate(self, catalog: AbilityCatalog, ability_id: str, step_number: int) -> None:
         if step_number >= self.max_steps:

@@ -239,7 +239,7 @@ def _serve(
     parser: argparse.ArgumentParser, catalog: AbilityCatalog, args: argparse.Namespace
 ) -> None:
     executor = _build_executor(parser, args, catalog)
-    policy = LabPolicy()
+    policy = LabPolicy(max_attempts=args.max_attempts)
     agent_policies = _agent_policies(parser, catalog, args.agent_policy)
     coordinator = Coordinator(
         catalog,
@@ -338,6 +338,16 @@ def main(argv: list[str] | None = None) -> None:
     )
     run.add_argument("--no-status", action="store_true")
     run.add_argument(
+        "--max-attempts",
+        type=positive_int,
+        default=1,
+        metavar="N",
+        help=(
+            "how many times one ability may be attempted. Above one a failure "
+            "can be retried, which spends a step something else could have used"
+        ),
+    )
+    run.add_argument(
         "--fault-ability",
         action="append",
         default=[],
@@ -394,6 +404,16 @@ def main(argv: list[str] | None = None) -> None:
         "--status", type=Path, default=None, help="status file (default: next to --log)"
     )
     serve.add_argument("--no-status", action="store_true")
+    serve.add_argument(
+        "--max-attempts",
+        type=positive_int,
+        default=1,
+        metavar="N",
+        help=(
+            "how many times one ability may be attempted. Above one a failure "
+            "can be retried, which spends a step something else could have used"
+        ),
+    )
     serve.add_argument(
         "--fault-ability",
         action="append",
@@ -483,6 +503,7 @@ def main(argv: list[str] | None = None) -> None:
     orchestrator = Orchestrator(
         catalog,
         executor,
+        policy=LabPolicy(max_attempts=args.max_attempts),
         planner_mode=args.planner,
         q_table_path=None if args.no_q_table else args.q_table,
     )
