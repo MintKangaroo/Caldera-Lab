@@ -2383,3 +2383,45 @@ def test_the_search_refuses_output_that_never_produced_a_declared_trait(
 
 def test_a_real_run_produces_every_trait_it_declares(catalog: AbilityCatalog) -> None:
     assert bench.unproduced_traits(catalog, _distinct_outcomes(catalog)) == {}
+
+
+def test_a_burst_does_not_collapse_onto_one_state(catalog: AbilityCatalog) -> None:
+    """The reason the state counts issued work rather than finished work: in a
+    burst nothing has completed, so a state built from completions would be
+    identical for every agent in it."""
+    outcomes = _distinct_outcomes(catalog)
+    for agents in (1, 2, 4):
+        measured = bench.concurrency(catalog, outcomes, agents)
+        assert measured.distinct_states >= len(catalog.ids()) - 2
+
+
+def test_the_fact_state_tells_a_burst_apart_from_a_sequential_run(
+    catalog: AbilityCatalog,
+) -> None:
+    """Mid-burst nothing has reported, so no trait is known yet. That is a
+    different situation from the same step of a sequential run, where a
+    producer may already have landed, and the state says so."""
+    outcomes = _distinct_outcomes(catalog)
+    lightly_trained = bench.concurrency(catalog, outcomes, 4, episodes=5)
+    assert lightly_trained.transfer < 100.0
+    # The states are reachable sequentially, just off the greedy path, so
+    # exploration finds them and the two modes end up sharing a table.
+    well_trained = bench.concurrency(catalog, outcomes, 4, episodes=500)
+    assert well_trained.transfer > lightly_trained.transfer
+
+
+def test_the_ability_mask_cannot_tell_them_apart(catalog: AbilityCatalog) -> None:
+    """Which is why the previous representation transferred trivially: the set
+    of issued abilities is the same whoever received them."""
+    outcomes = _distinct_outcomes(catalog)
+    measured = bench.concurrency(catalog, outcomes, 4, episodes=5, state_mode="issued")
+    assert measured.transfer == 100.0
+
+
+def test_concurrency_without_training_reports_no_transfer(
+    catalog: AbilityCatalog,
+) -> None:
+    measured = bench.concurrency(catalog, _distinct_outcomes(catalog), 2)
+    assert measured.hits == 0
+    assert measured.transfer == 0.0
+    assert measured.lookups > 0

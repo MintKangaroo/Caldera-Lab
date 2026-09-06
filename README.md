@@ -234,34 +234,46 @@ beacon은 능력 ID와 이 값들을 함께 보냅니다. 명령은 여전히 �
 
 ### 동시 실행과 RL 신용 할당
 
-state는 **완료한 능력이 아니라 배정된 능력** 집합으로 계산합니다. 순차 실행에서는 두 집합이
-같으므로 동작이 동일하지만, 동시 실행에서는 결과가 오기 전에 배정이 나가므로 완료 기준으로는
-여러 배정이 같은 state로 뭉개집니다. 배정 기준으로 바꾼 결과:
+state는 **완료한 작업이 아니라 배정된 작업**을 기준으로 만듭니다. 순차 실행에서는 두 기준이
+같지만, 동시 실행에서는 결과가 오기 전에 배정이 나가므로 완료 기준으로는 burst 안의 모든
+에이전트가 같은 state로 뭉개집니다.
+
+```bash
+caldera-lab bench --log run.jsonl --agents 1 2 4 6 --episodes 500
+```
 
 ```text
-             완료 기반    배정 기반
-agents=1     8 states     8 states
-agents=2     4 states     8 states
-agents=4     2 states     8 states
-agents=6     3 states     8 states
+ agents  distinct states   transfer
+      1               12     100.0%
+      2               12     100.0%
+      4               12     100.0%
+      6               11      90.9%
 ```
+
+`transfer`는 **순차로 학습한 table을 동시 실행이 얼마나 읽는가**입니다. 학습량에 따라
+달라지므로 하나의 숫자가 아닙니다.
+
+```text
+  순차 에피소드    issued     facts
+             5    100.0%     45.5%
+            20    100.0%     54.5%
+           100    100.0%     72.7%
+           500    100.0%    100.0%
+```
+
+**`issued`가 항상 100%인 것은 장점이 아닙니다.** 배정된 능력 집합은 누가 언제 받든 같으므로,
+그 표현은 동시 실행과 순차 실행을 애초에 구분하지 못합니다. `facts`가 낮게 시작하는 것은
+반대로 **구분하기 때문**입니다 — burst 도중에는 아직 아무 결과도 오지 않아 알려진 trait이
+없고, 그건 같은 단계의 순차 실행과 실제로 다른 상황입니다. 그 state들은 순차로도 도달
+가능하지만 greedy 경로 밖이라, 탐험이 진행되면 두 모드가 같은 table을 씁니다.
 
 state의 두 번째 성분은 "직전 단계가 어떻게 끝났는지"가 아니라 **지금까지 실패가 있었는지**
-(`clean` / `degraded`)입니다. "직전 단계"는 두 모드에서 같은 뜻이 아닙니다. 동시 실행은 burst
-도중 완료된 단계가 아예 없으므로, 직전 결과 기준으로는 순차 실행이 한 번도 쓰지 않는 key를
-조회했고 한쪽에서 학습한 table이 다른 쪽에서는 무용지물이었습니다.
+(`clean` / `degraded`)입니다. "직전 단계"는 두 모드에서 같은 뜻이 아닙니다 — burst 도중에는
+완료된 단계가 아예 없습니다. 이 성분은 sticky합니다: 한 번 실패하면 복구해도 `degraded`로
+남습니다. "아직 아무 문제도 없었다"가 더는 참이 아니기 때문입니다.
 
-```text
-                    직전 결과 기준   실패 여부 기준
-동시 실행 4 에이전트     38%              75%
-```
-
-남은 25%는 모드 불일치가 아니라 탐험으로 갈라진 경로입니다. 순차 학습은 한 경로만 방문하므로
-그 밖의 mask는 원래 table에 없습니다. 이 성분은 sticky합니다 — 한 번 실패하면 이후 복구해도
-`degraded`로 남습니다. "아직 아무 문제도 없었다"가 더는 참이 아니기 때문입니다.
-
-state의 의미가 바뀌었으므로 `Q_TABLE_VERSION`을 2로 올렸습니다. 버전 1 table은 조용히
-무시되고 빈 table로 시작합니다(`rl.loaded` 이벤트의 `restored: false`).
+state 표현이 바뀔 때마다 저장된 table의 key 의미가 달라지므로, 지문에 상태 모드가 들어가고
+`Q_TABLE_VERSION`이 맞지 않는 table은 조용히 무시됩니다(`rl.loaded`의 `restored: false`).
 
 ### 정책이 실제로 무엇을 배우는지
 
@@ -287,8 +299,7 @@ state의 의미가 바뀌었으므로 `Q_TABLE_VERSION`을 2로 올렸습니다.
 분명했습니다.
 
 ```text
-무작위 순서 300회의 총 보상
-  예산 11 (전량 실행)   min 12.403  max 12.403   편차 0.000
+전량 실행 무작위 순서의 총 보상 편차   0.0000
 ```
 
 **정보 이득이 novel/(novel+known)로 정규화되므로 처음 실행하는 능력은 무엇이든 정확히 같은
@@ -467,7 +478,7 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 172 passed
+pytest             -> 176 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
@@ -485,7 +496,7 @@ RL 행동 공간       -> 잠금 해제된 작업이 후보에서 누락되던 �
 RL 순서 학습       -> depth 2 사슬 추가로 학습 여지 0.6034 -> 1.0792, 25000에서 85.7%
 bench              -> caldera-lab bench로 위 수치 전부 재현 가능
 최적 순서          -> 2^11 부분집합 DP로 정확히 계산, 최악 순서 = catalog 순서
-Q table 전이       -> 순차 학습 table의 동시 실행 적중률 38% -> 75%
+Q table 전이       -> 순차 학습 500 에피소드 후 동시 실행 적중률 100% (facts 기준)
 Agent starvation   -> 98% -> 0% (200회 시행), 교착 없음
 GitHub Actions     -> success (quality 3.10/3.12 + docker-smoke)
 Claude planner     -> 실제 키로 end-to-end 확인. refusal(cyber)로 거부되며 rules로 fallback

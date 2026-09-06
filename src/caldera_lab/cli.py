@@ -13,8 +13,10 @@ from .bench import (
     NotOrderIndependent,
     TooManyAbilities,
     bounds,
+    concurrency,
     evaluate,
     outcomes_from_log,
+    render_concurrency,
 )
 from .bench import render as render_bench
 from .catalog import AbilityCatalog
@@ -89,6 +91,14 @@ def _bench(
         episodes: evaluate(catalog, outcomes, episodes, state_mode=args.state_mode)
         for episodes in sorted(args.episodes)
     }
+    agent_rows = [
+        concurrency(
+            catalog, outcomes, agents,
+            episodes=max(args.episodes) if args.episodes else 0,
+            state_mode=args.state_mode,
+        )
+        for agents in sorted(args.agents)
+    ]
     if args.json:
         print(
             json.dumps(
@@ -106,6 +116,14 @@ def _bench(
                         }
                         for episodes, (value, order) in measured.items()
                     },
+                    "concurrency": [
+                        {
+                            "agents": row.agents,
+                            "distinct_states": row.distinct_states,
+                            "transfer_percent": round(row.transfer, 3),
+                        }
+                        for row in agent_rows
+                    ],
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -113,6 +131,9 @@ def _bench(
         )
         return
     print(render_bench(limits, measured))
+    if agent_rows:
+        print()
+        print(render_concurrency(agent_rows, bool(args.episodes)))
 
 
 class _EventSink:
@@ -344,6 +365,14 @@ def main(argv: list[str] | None = None) -> None:
         default=[],
         metavar="N",
         help="train for this many episodes before measuring; repeatable",
+    )
+    bench.add_argument(
+        "--agents",
+        type=int,
+        nargs="*",
+        default=[],
+        metavar="N",
+        help="also report what a burst of N concurrent agents sees; repeatable",
     )
     bench.add_argument("--state-mode", choices=("facts", "issued"), default=None)
     bench.add_argument("--json", action="store_true")

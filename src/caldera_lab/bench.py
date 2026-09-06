@@ -25,6 +25,8 @@ from .reward import RewardModel
 
 __all__ = [
     "Bounds",
+    "Concurrency",
+    "concurrency",
     "DependencyNotObserved",
     "NotOrderIndependent",
     "TooManyAbilities",
@@ -277,6 +279,103 @@ def evaluate(
     for index in range(episodes):
         episode(False, seed + index)
     return episode(True, seed)
+
+
+@dataclass(frozen=True)
+class Concurrency:
+    """What concurrent dispatch does to the states a policy sees."""
+
+    agents: int
+    distinct_states: int
+    lookups: int
+    hits: int
+
+    @property
+    def transfer(self) -> float:
+        """Share of lookups a sequentially trained table can answer."""
+        return 100.0 * self.hits / self.lookups if self.lookups else 0.0
+
+
+def _dispatch(
+    catalog: AbilityCatalog,
+    scorer: _Scorer,
+    agents: int,
+    state_mode: str | None,
+    table: dict[tuple[str, str], float] | None = None,
+    greedy: bool = False,
+    seed: int = 0,
+) -> list[str]:
+    """Run once, handing work to `agents` agents before any of them reports.
+
+    Returns the state used at each hand-out. A burst is the case the state has
+    to get right: nothing has completed, so a state built from finished work
+    would be identical for every agent in it.
+    """
+    coordinator = Coordinator(
+        catalog, planner_mode="rules", seed=seed,
+        max_steps=len(catalog.ids()), state_mode=state_mode,
+    )
+    if table is not None:
+        coordinator.rl.q = table
+    if greedy:
+        coordinator.rl.epsilon = 0.0
+    seen: list[str] = []
+    original = coordinator.rl.choose
+
+    def spy(state: str, candidates: tuple[str, ...]) -> str:
+        seen.append(state)
+        return original(state, candidates)
+
+    coordinator.rl.choose = spy
+    coordinator.start()
+    done = False
+    while not done:
+        batch: list[tuple[str, str]] = []
+        for index in range(agents):
+            assignment = coordinator.next_assignment(f"agent-{index + 1}")
+            if assignment is None:
+                done = True
+                break
+            batch.append((f"agent-{index + 1}", assignment.ability_id))
+        for agent_id, ability_id in batch:
+            coordinator.record_result(scorer.result(ability_id), agent_id=agent_id)
+    return seen
+
+
+def concurrency(
+    catalog: AbilityCatalog,
+    outcomes: dict[str, str],
+    agents: int,
+    episodes: int = 0,
+    state_mode: str | None = None,
+    seed: int = 0,
+) -> Concurrency:
+    """Distinct states under a burst, and how much sequential training carries.
+
+    Training is sequential; the measured run is concurrent. A key a burst asks
+    for that sequential training never wrote is learning the two modes cannot
+    share.
+    """
+    scorer = _Scorer(catalog, outcomes)
+    table: dict[tuple[str, str], float] = {}
+    for index in range(episodes):
+        _dispatch(catalog, scorer, 1, state_mode, table, seed=seed + index)
+    learned = {state for state, _ in table}
+    seen = _dispatch(catalog, scorer, agents, state_mode, dict(table), greedy=True, seed=seed)
+    hits = sum(1 for state in seen if state in learned) if learned else 0
+    return Concurrency(agents, len(set(seen)), len(seen), hits)
+
+
+def render_concurrency(rows: list[Concurrency], trained: bool) -> str:
+    lines = [f"{'agents':>7}  {'distinct states':>15}"]
+    if trained:
+        lines[0] += f"  {'transfer':>9}"
+    for row in rows:
+        line = f"{row.agents:>7}  {row.distinct_states:>15}"
+        if trained:
+            line += f"  {row.transfer:>8.1f}%"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def render(bounds_: Bounds, measured: dict[int, tuple[float, tuple[str, ...]]]) -> str:

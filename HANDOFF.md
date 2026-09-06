@@ -214,6 +214,11 @@ LLM은 command를 생성하지 않고 allowlist의 `ability_id`만 제안합니�
    일치해야 합니다. 11개 능력 / 8개 technique. beacon은 ID와 값만 전달하고 에이전트가
    자기 catalog로 재검증합니다. `LabPolicy.max_steps` 기본값 8 -> 12.
 
+8-1. **순차↔동시 전이는 하나의 숫자가 아닙니다**: 학습량의 함수입니다. `facts`는 5
+   에피소드에서 45.5%, 500에서 100%입니다. `issued`는 항상 100%인데 이건 장점이 아니라
+   배정 마스크가 동시 실행과 순차 실행을 애초에 구분하지 못한다는 뜻입니다. 이전 문서의
+   "38% -> 75%"는 outcome 성분이 `last_status`이던 시절 수치로 더는 유효하지 않습니다.
+
 9. ~~**보상이 순서를 구분하지 못함**~~: 깊이 보상으로 해결. 능력마다 depth(선행 발견 사슬의
    길이)를 부여하고 `depth_weight * depth`를 보상에 더합니다. 총 보상은 여전히 집합
    함수지만, 할인된 수익은 순서에 따라 달라집니다.
@@ -260,6 +265,7 @@ README의 RL 수치는 전부 `caldera-lab bench`가 만듭니다.
 caldera-lab run --executor docker --planner rules --steps 12 --log run.jsonl
 caldera-lab bench --log run.jsonl --episodes 0 2500 12000 25000
 caldera-lab bench --log run.jsonl --state-mode issued --episodes 2500
+caldera-lab bench --log run.jsonl --agents 1 2 4 6 --episodes 500
 ```
 
 DP는 두 가지 전제를 가정하지 않고 검사합니다: 능력별 보상이 순서와 무관한지, 그리고 기록된
