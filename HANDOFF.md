@@ -251,3 +251,17 @@ PYTHONPATH=src pytest -q
 ```
 
 새 세션에서 기존 사용자 변경이 보이면 되돌리거나 덮어쓰지 말고 먼저 상태를 확인합니다.
+
+## 8. 측정 도구
+
+README의 RL 수치는 전부 `caldera-lab bench`가 만듭니다.
+
+```bash
+caldera-lab run --executor docker --planner rules --steps 11 --log run.jsonl
+caldera-lab bench --log run.jsonl --episodes 0 200 2500 12000
+caldera-lab bench --log run.jsonl --state-mode issued --episodes 2500
+```
+
+DP는 두 가지 전제를 가정하지 않고 검사합니다: 능력별 보상이 순서와 무관한지, 그리고 기록된
+출력이 선언된 trait을 실제로 만들어내는지. 둘 중 하나라도 어긋나면 DP가 도달 불가능하거나
+틀린 순서를 최적이라고 보고하므로 거부합니다. DP 자체는 완전탐색과 대조하는 테스트가 있습니다.

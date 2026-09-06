@@ -13,10 +13,11 @@ from unittest import mock
 
 import pytest
 
-from caldera_lab import cli
+from caldera_lab import bench, cli
 from caldera_lab import planner as planner_module
 from caldera_lab.agent import BeaconAgent, BeaconUnauthorised
 from caldera_lab.beacon import BeaconRefused, BeaconServer, BeaconState
+from caldera_lab.bench import _Scorer as _BenchScorer
 from caldera_lab.catalog import Ability, AbilityCatalog
 from caldera_lab.coordinator import Coordinator
 from caldera_lab.executor import (
@@ -2182,3 +2183,185 @@ def test_claude_planner_without_a_key_never_calls_out(
     plan = ClaudePlanner(catalog, client=client, attempts=1).plan((), 4)
     assert plan.diagnostics["fallback_reason"] == "no_api_key"
     assert client.calls == []
+
+
+# Enough for each producing ability's own extraction pattern to match.
+FACT_LINES = {
+    "collect-process-list": "nobody 1 0 x\n",
+    "collect-installed-packages": "busybox\n",
+    "collect-account-list": "root:x:0:0\n",
+    "lister": "7\n",
+    "probe": "value\n",
+}
+
+
+def _distinct_outcomes(catalog: AbilityCatalog) -> dict[str, str]:
+    """One recorded output per ability, sharing no lines with any other.
+
+    Producing abilities also carry a line their own pattern matches, because a
+    recorded run where a declared trait never appeared is refused: the search
+    would report an order the lab could not actually take.
+    """
+    return {
+        item: f"{item} first line\n{item} second line\n" + FACT_LINES.get(item, "")
+        for item in catalog.ids()
+    }
+
+
+def _brute_force(catalog: AbilityCatalog, outcomes: dict[str, str]) -> tuple[float, float]:
+    """Every feasible order, scored the way a run would score it."""
+    scorer = _BenchScorer(catalog, outcomes)
+    results: list[float] = []
+
+    def walk(order: list[str], known: frozenset[str]) -> None:
+        available = [
+            item
+            for item in catalog.ids()
+            if item not in order and set(catalog.get(item).requires) <= known
+        ]
+        if not available:
+            results.append(bench.discounted(scorer.rollout(tuple(order))))
+            return
+        for item in available:
+            walk(
+                [*order, item],
+                known | {producer.trait for producer in catalog.get(item).produces},
+            )
+
+    walk([], frozenset())
+    return max(results), min(results)
+
+
+def test_the_exact_search_agrees_with_brute_force(tmp_path: Path) -> None:
+    """The dynamic program is the reference every measurement is quoted
+    against, so it has to actually be the optimum."""
+    catalog = _catalog_from(
+        {
+            "traits": PID_TRAITS,
+            "abilities": [
+                _producer(),
+                _minimal(),
+                {
+                    "id": "spare",
+                    "name": "Spare",
+                    "tactic": "discovery",
+                    "technique": "T0009",
+                    "command": ["true"],
+                    "description": "d",
+                },
+            ],
+        },
+        tmp_path,
+    )
+    outcomes = _distinct_outcomes(catalog)
+    limits = bench.bounds(catalog, outcomes)
+    best, worst = _brute_force(catalog, outcomes)
+    assert limits.best == pytest.approx(best)
+    assert limits.worst == pytest.approx(worst)
+
+
+def test_the_search_refuses_a_catalog_whose_rewards_depend_on_order(
+    catalog: AbilityCatalog,
+) -> None:
+    """Identical output does not break the assumption -- normalised gain just
+    moves the same total between the two. Overlap of different sizes does: the
+    short one first leaves the long one half novel, and the run is worth more."""
+    outcomes = _distinct_outcomes(catalog)
+    long_one, short_one = list(outcomes)[:2]
+    outcomes[long_one] = "shared\nonly in the long one\n"
+    outcomes[short_one] = "shared\n"
+    assert bench.order_spread(catalog, outcomes, trials=40) > 0
+    with pytest.raises(bench.NotOrderIndependent):
+        bench.bounds(catalog, outcomes, check_trials=40)
+
+
+def test_the_shipped_catalog_rewards_do_not_depend_on_order(
+    catalog: AbilityCatalog,
+) -> None:
+    assert bench.order_spread(catalog, _distinct_outcomes(catalog), trials=40) == 0.0
+
+
+def test_catalog_order_is_the_worst_order_available(catalog: AbilityCatalog) -> None:
+    """Which is why an untrained policy starts at zero percent of the range:
+    it runs the catalog in order, and the gated abilities are declared last."""
+    limits = bench.bounds(catalog, _distinct_outcomes(catalog))
+    assert limits.worst_order == catalog.ids()
+    assert limits.headroom > 0
+
+
+def test_an_untrained_policy_sits_at_the_bottom_of_the_range(
+    catalog: AbilityCatalog,
+) -> None:
+    outcomes = _distinct_outcomes(catalog)
+    limits = bench.bounds(catalog, outcomes)
+    value, order = bench.evaluate(catalog, outcomes, episodes=0)
+    assert order == catalog.ids()
+    assert limits.position(value) == pytest.approx(0.0)
+
+
+def test_the_search_refuses_a_catalog_too_large_to_enumerate(
+    catalog: AbilityCatalog, monkeypatch
+) -> None:
+    monkeypatch.setattr(bench, "MAX_ABILITIES", 2)
+    with pytest.raises(bench.TooManyAbilities):
+        bench.bounds(catalog, _distinct_outcomes(catalog))
+
+
+def test_outcomes_are_recovered_from_an_audit_log(tmp_path: Path) -> None:
+    log = tmp_path / "run.jsonl"
+    log.write_text(_completed("collect-host-identity") + "\n", encoding="utf-8")
+    assert bench.outcomes_from_log(log) == {"collect-host-identity": ""}
+
+
+def test_bench_cli_reports_the_range(tmp_path: Path, capsys) -> None:
+    log = tmp_path / "run.jsonl"
+    catalog = AbilityCatalog.from_json(ROOT / "catalog" / "abilities.json")
+    outcomes = _distinct_outcomes(catalog)
+    log.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "run_id": "r1",
+                    "event": "ability.completed",
+                    "details": {
+                        "ability_id": item,
+                        "status": "succeeded",
+                        "isolation": "docker",
+                        "stdout": stdout,
+                        "duration_seconds": 0.1,
+                    },
+                }
+            )
+            for item, stdout in outcomes.items()
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    cli.main(["bench", "--log", str(log), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["headroom"] > 0
+    assert payload["worst_order"] == list(catalog.ids())
+
+
+def test_bench_cli_refuses_a_missing_log(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["bench", "--log", str(tmp_path / "absent.jsonl")])
+
+
+def test_the_search_refuses_output_that_never_produced_a_declared_trait(
+    catalog: AbilityCatalog,
+) -> None:
+    """Availability comes from the catalog in the search and from the output in
+    a real run. When they disagree the reported best order is unreachable."""
+    outcomes = _distinct_outcomes(catalog)
+    outcomes["collect-process-list"] = "no pid here\n"
+    assert bench.unproduced_traits(catalog, outcomes) == {
+        "collect-process-list": ["host.process.pid"]
+    }
+    with pytest.raises(bench.DependencyNotObserved, match="host.process.pid"):
+        bench.bounds(catalog, outcomes)
+
+
+def test_a_real_run_produces_every_trait_it_declares(catalog: AbilityCatalog) -> None:
+    assert bench.unproduced_traits(catalog, _distinct_outcomes(catalog)) == {}

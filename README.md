@@ -297,21 +297,27 @@ state의 의미가 바뀌었으므로 `Q_TABLE_VERSION`을 2로 올렸습니다.
 총 보상은 여전히 집합 함수입니다. 순서를 만드는 것은 **할인**입니다: Q-learning은 `Σ γᵗ r_t`를
 최대화하므로, 능력마다 값이 다르면 값진 것을 먼저 하는 편이 유리해집니다.
 
-```text
-실제 컨테이너 출력, 전량 실행 300개 무작위 순서 (gamma 0.85)
-  총 보상        편차 0.0000            <- 여전히 집합 함수
-  할인된 수익    7.2615 ~ 7.7416        <- 여기서 순서가 갈립니다
+이 절의 수치는 저장소 안의 도구가 만듭니다. 감사 로그를 넣으면 그대로 재현됩니다.
+
+```bash
+caldera-lab run --executor docker --planner rules --steps 11 --log run.jsonl
+caldera-lab bench --log run.jsonl --episodes 0 200 800 2500 6000 12000
 ```
 
-측정 기준을 정확히 잡는 것이 이 실험에서 제일 어려웠습니다. 처음에는 무작위 순서 300개의
-최고값을 상한으로 썼는데, 그건 최적이 아닙니다. 능력별 보상이 순서와 무관하므로 2^11개
-부분집합에 대한 DP로 **정확한 최적 순서**를 구할 수 있습니다.
+`bench`는 능력별 보상이 순서와 무관하다는 전제 위에서 2^11개 부분집합에 대한 DP로 **정확한
+최적·최악 순서**를 구합니다. 그 전제를 가정하지 않고 검사합니다 — 무작위 실행 순서들의 총
+보상 편차가 0이 아니면 거부합니다. 정보 이득이 정규화되어 있어 출력이 완전히 같은 두 능력은
+문제가 없지만, 크기가 다른 중첩은 문제가 됩니다(짧은 쪽을 먼저 실행하면 긴 쪽이 절반만
+새로워집니다).
+
+기록된 출력이 선언된 trait을 실제로 만들어내는지도 검사합니다. DP는 가용성을 catalog에서
+읽고 실제 실행은 출력에서 읽으므로, 둘이 어긋나면 **랩이 갈 수 없는 순서를 최적이라고
+보고하게 됩니다.**
 
 ```text
-최적 순서    7.8650   process-list -> inspect-process-status ->
-                      installed-packages -> inspect-package-contents -> ...
-최악 순서    7.2615   = catalog 순서 (학습 전 정책이 실행하는 바로 그 순서)
-학습 여지    0.6034
+best feasible order   7.8927
+worst feasible order  7.2893   = catalog 순서 (학습 전 정책이 실행하는 순서)
+headroom              0.6034
 ```
 
 최적 정책은 해석 가능합니다: **생산자를 실행하고 그 후속을 곧바로 수확**하는 것을 세 번
@@ -319,27 +325,14 @@ state의 의미가 바뀌었으므로 `Q_TABLE_VERSION`을 2로 올렸습니다.
 값집니다.
 
 ```text
-학습 전          7.2615    0.0% of headroom
-  800 에피소드   7.3584   16.1%
- 2500 에피소드   7.5051   40.4%
- 6000 에피소드   7.5558   48.8%
-12000 에피소드   7.5762   52.2%
-25000 에피소드   7.6003   56.1%
+ episodes    return   of headroom
+        0    7.2893          0.0%
+      200    7.4855         32.5%
+      800    7.6040         52.1%
+     2500    7.8134         86.9%
+     6000    7.8134         86.9%
+    12000    7.8927        100.0%
 ```
-
-25000 에피소드의 실행 순서입니다.
-
-```text
-collect-host-identity      collect-system-info
-collect-process-list    -> inspect-process-status
-collect-installed-packages -> inspect-package-contents
-collect-account-list    -> inspect-account-identity
-collect-network-interfaces  collect-container-context  collect-workspace-files
-```
-
-**세 쌍이 모두 올바르게 짝지어져 있습니다.** 정책은 "생산자를 실행하고 곧바로 수확한다"를
-학습했습니다. 최적과의 차이는 앞의 표면 능력 두 개(`collect-host-identity`,
-`collect-system-info`)를 먼저 실행하는 것뿐입니다.
 
 ### 상태 표현
 
@@ -355,16 +348,13 @@ issued  능력 배정 마스크 + 결과      2^11 x 2 = 4096 가능
 facts   알려진 trait + 단계 + 결과   2^3 x 12 x 2 = 192 가능
 ```
 
-두 표현을 같은 harness로 비교했습니다(DP 최적 대비 학습 여지의 몇 %).
+두 표현을 같은 도구로 비교했습니다(`--state-mode`, DP 최적 대비 학습 여지의 몇 %).
 
 ```text
   에피소드    issued     facts
        200      0.0%     32.5%
-       800     16.0%     52.2%
       2500     40.4%     86.9%
-      6000     48.8%     86.9%
-     12000     52.2%    100.0%   <- 최적
-  방문 상태      360        55
+     12000     52.1%    100.0%   <- 최적
 ```
 
 fact 기반은 12000 에피소드에서 **정확히 최적 순서**에 도달합니다.
@@ -465,7 +455,7 @@ CLI의 `--allow-local` 게이트, 정책의 네트워크·승인 집합 거부, 
 
 ```text
 ruff check .       -> All checks passed
-pytest             -> 167 passed
+pytest             -> 170 passed
 Docker execution   -> 4/4 abilities succeeded as uid=65534(nobody)
 Workspace mount    -> read-only enforced (touch -> Read-only file system)
 RL state space     -> 633 -> 31 states (도달 가능 기준), 8회 실행 내내 4개 항목 재방문
@@ -481,7 +471,8 @@ Timeout            -> timed-out 상태, 컨테이너 누수 0건 (수정 전: �
 RL credit          -> 4 에이전트 동시 실행 시 고유 state 2 -> 8 (순차와 동일)
 RL 행동 공간       -> 잠금 해제된 작업이 후보에서 누락되던 문제 수정 (2/6 -> 6/6)
 RL 순서 학습       -> 상태를 fact 기반으로 바꾼 뒤 12000 에피소드에서 DP 최적 100% 도달
-                      (배정 마스크 기반은 같은 지점에서 52.2%, 방문 상태 360 -> 55)
+                      (배정 마스크 기반은 같은 지점에서 52.1%)
+bench              -> caldera-lab bench로 위 수치 전부 재현 가능
 최적 순서          -> 2^11 부분집합 DP로 정확히 계산, 최악 순서 = catalog 순서
 Q table 전이       -> 순차 학습 table의 동시 실행 적중률 38% -> 75%
 Agent starvation   -> 98% -> 0% (200회 시행), 교착 없음
@@ -503,6 +494,7 @@ Caldera_Lab/
 ├── src/caldera_lab/rl.py        # tabular Q policy + JSON 영속화
 ├── src/caldera_lab/reward.py    # 정보 이득 기반 보상
 ├── src/caldera_lab/report.py    # 감사 로그 집계 + ATT&CK 커버리지 + 상태 문서
+├── src/caldera_lab/bench.py     # DP 최적 순서 + 정책 측정
 ├── src/caldera_lab/coordinator.py  # planner+RL+보상 단일 결정 지점
 ├── src/caldera_lab/beacon.py    # loopback 전용 beacon 서버
 ├── src/caldera_lab/agent.py     # beacon 에이전트 (랩 측 supervisor)

@@ -8,6 +8,15 @@ from pathlib import Path
 
 from .agent import BeaconAgent
 from .beacon import BeaconServer, BeaconState
+from .bench import (
+    DependencyNotObserved,
+    NotOrderIndependent,
+    TooManyAbilities,
+    bounds,
+    evaluate,
+    outcomes_from_log,
+)
+from .bench import render as render_bench
 from .catalog import AbilityCatalog
 from .coordinator import Coordinator
 from .executor import DockerLabExecutor, DryRunExecutor, ExecutionResult, LocalLabExecutor
@@ -64,6 +73,46 @@ def _status_path(args: argparse.Namespace) -> Path | None:
     if getattr(args, "no_status", False):
         return None
     return args.status or args.log.parent / "status.json"
+
+
+def _bench(
+    parser: argparse.ArgumentParser, catalog: AbilityCatalog, args: argparse.Namespace
+) -> None:
+    if not args.log.exists():
+        parser.error(f"audit log not found: {args.log}")
+    outcomes = outcomes_from_log(args.log)
+    try:
+        limits = bounds(catalog, outcomes)
+    except (DependencyNotObserved, NotOrderIndependent, TooManyAbilities, ValueError) as error:
+        parser.error(str(error))
+    measured = {
+        episodes: evaluate(catalog, outcomes, episodes, state_mode=args.state_mode)
+        for episodes in sorted(args.episodes)
+    }
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "best": round(limits.best, 6),
+                    "best_order": list(limits.best_order),
+                    "worst": round(limits.worst, 6),
+                    "worst_order": list(limits.worst_order),
+                    "headroom": round(limits.headroom, 6),
+                    "measured": {
+                        str(episodes): {
+                            "return": round(value, 6),
+                            "headroom_percent": round(limits.position(value), 3),
+                            "order": list(order),
+                        }
+                        for episodes, (value, order) in measured.items()
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+    print(render_bench(limits, measured))
 
 
 class _EventSink:
@@ -284,8 +333,26 @@ def main(argv: list[str] | None = None) -> None:
         help="write the lab-status document a control room polls, instead of printing",
     )
 
+    bench = sub.add_parser(
+        "bench", help="measure a policy against the best order that was available"
+    )
+    bench.add_argument("--log", type=Path, default=Path(".runtime/run.jsonl"))
+    bench.add_argument(
+        "--episodes",
+        type=int,
+        nargs="*",
+        default=[],
+        metavar="N",
+        help="train for this many episodes before measuring; repeatable",
+    )
+    bench.add_argument("--state-mode", choices=("facts", "issued"), default=None)
+    bench.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
     catalog = AbilityCatalog.from_json(CATALOG)
+    if args.command == "bench":
+        _bench(parser, catalog, args)
+        return
     if args.command == "report":
         _report(parser, catalog, args)
         return
